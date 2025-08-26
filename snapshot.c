@@ -5,6 +5,8 @@
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/version.h>
+#include <linux/kmod.h> // per call_usermodehelper
+#include <linux/timekeeping.h> // per timestamp
 #include "snapshot.h"
 
 #define DEVICE_NAME "snapshot"
@@ -15,6 +17,33 @@ static struct class* snapshot_class = NULL;
 static struct device* snapshot_device = NULL;
 
 static char activated_device[256] = {0}; // solo un device per MVP
+
+// Funzione per creare la cartella snapshot in /snapshot/<devname>-<timestamp>
+static int create_snapshot_folder(const char *devname) {
+    char path[256];
+    char ts[32];
+    unsigned long sec;
+    struct timespec64 tspec;
+    int rc;
+
+    // ottieni tempo corrente in secondi
+    ktime_get_real_ts64(&tspec);
+    sec = tspec.tv_sec;
+
+    // costruisci stringa timestamp YYYYMMDD-HHMMSS
+    snprintf(ts, sizeof(ts), "%08lu-%06lu", sec / 86400, sec % 86400);
+
+    // costruisci path completo
+    snprintf(path, sizeof(path), "/snapshot/%s-%s", devname, ts);
+
+    {
+        char *argv[] = { "/usr/bin/mkdir", "-p", path, NULL };
+        char *envp[] = { "HOME=/", "PATH=/sbin:/bin:/usr/bin", NULL };
+        rc = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
+        pr_info("snapshot: mkdir -p %s returned %d\n", path, rc);
+        return rc;
+    }
+}
 
 static long snapshot_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
     char user_input[256];
@@ -29,6 +58,10 @@ static long snapshot_ioctl(struct file *file, unsigned int cmd, unsigned long ar
             if (strcmp(user_input, SNAPSHOT_PASSWD) == 0) {
                 strncpy(activated_device, "demo_device", sizeof(activated_device));
                 pr_info("Snapshot attivato per device: %s\n", activated_device);
+
+                // CREA CARTELLA SNAPSHOT
+                create_snapshot_folder(activated_device);
+
             } else {
                 pr_warn("Password errata in activate\n");
                 return -EACCES;
@@ -93,7 +126,7 @@ static void __exit snapshot_exit(void) {
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Tu");
-MODULE_DESCRIPTION("MVP snapshot LKM con ioctl");
+MODULE_DESCRIPTION("MVP snapshot LKM con ioctl e directory /snapshot");
 module_init(snapshot_init);
 module_exit(snapshot_exit);
 
