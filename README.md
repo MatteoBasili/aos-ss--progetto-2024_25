@@ -36,7 +36,7 @@ Key goals of the project include:
 - **Compatibility with Loop Devices**  
   Support loop devices by treating the `dev_name` parameter as the file path associated with the loop device.
 
-The final implementation must be testable using the minimal file system layout provided by the course instructor.  
+The final implementation must be testable using the minimal file system layout provided by the course instructor (available at [this link](https://francescoquaglia.github.io/TEACHING/AOS/CURRENT/PROJECTS/SINGLEFILE-FS.tar)).  
 
 ---
 
