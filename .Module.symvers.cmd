@@ -1,1 +1,0 @@
-savedcmd_/home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/Module.symvers :=  scripts/mod/modpost -M -m -a      -o /home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/Module.symvers -T /home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/modules.order -i Module.symvers -e 
