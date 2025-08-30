@@ -8,3 +8,6 @@ load-snap-mod:
 
 clean:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+	
+remove-snap-mod:
+	rmmod bdev_snapshot

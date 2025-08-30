@@ -19,6 +19,9 @@ static void try_ioctl(int fd, unsigned long code, const char *name, const char *
     } else {
         printf("%s ok\n", name);
     }
+
+    /* zero local copy of password */
+    memset(args.password, 0, sizeof(args.password));
 }
 
 int main(int argc, char **argv)
@@ -36,8 +39,17 @@ int main(int argc, char **argv)
     printf("Using device node: %s\n", node);
     printf("Target block dev : %s\n", dev);
 
+    /* 1) Prima chiamata: se non esiste password nel modulo, la impostiamo */
+    printf("== First activation (may set password if not set yet) ==\n");
     try_ioctl(fd, SNAP_ACTIVATE,   "SNAP_ACTIVATE",   dev, pw);
+
+    /* 2) Deactivation: should succeed with same password */
+    printf("== Deactivation (using same password) ==\n");
     try_ioctl(fd, SNAP_DEACTIVATE, "SNAP_DEACTIVATE", dev, pw);
+
+    /* 3) Try wrong password */
+    printf("== Try activation with wrong password ==\n");
+    try_ioctl(fd, SNAP_ACTIVATE,   "SNAP_ACTIVATE",   dev, "wrongpw");
 
     close(fd);
     return 0;

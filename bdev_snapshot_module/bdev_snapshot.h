@@ -1,7 +1,8 @@
-#ifndef _BDEVSNAP_H
-#define _BDEVSNAP_H
+#ifndef _BDEVSNAPSHOT_H
+#define _BDEVSNAPSHOT_H
 
-#define MOD_NAME "bdev snapshot"
+/* Nome comodo per i log del modulo */
+#define MOD_NAME "bdev_snapshot"
 
 /* Per avere le macro _IO/_IOW sia in kernel che in user-space */
 #ifdef __KERNEL__
@@ -23,4 +24,5 @@ struct snap_args {
 #define SNAP_ACTIVATE    _IOW(BDEVSNAP_IOCTL_MAGIC, 1, struct snap_args)
 #define SNAP_DEACTIVATE  _IOW(BDEVSNAP_IOCTL_MAGIC, 2, struct snap_args)
 
-#endif
+#endif /* _BDEVSNAPSHOT_H */
+
