@@ -10,6 +10,7 @@
 #include <crypto/hash.h>
 #include <linux/slab.h>
 #include <linux/mutex.h>
+#include <linux/list.h>
 
 #include "bdev_snapshot.h"
 
@@ -18,10 +19,10 @@
 #endif
 
 /* Stato del char device */
-static dev_t dev_num;                /* major:minor allocato dinamicamente */
-static struct cdev bdev_cdev;        /* cdev per /dev/bdev_snapshot */
-static struct class *bdev_class;     /* classe udev */
-static struct device *bdev_device;   /* device udev */
+static dev_t dev_num;                
+static struct cdev bdev_cdev;        
+static struct class *bdev_class;     
+static struct device *bdev_device;   
 
 /* Password storage: SHA-256 (32 byte) */
 #define PW_HASH_LEN 32
@@ -29,8 +30,17 @@ static u8 pw_hash[PW_HASH_LEN];
 static bool pw_set = false;
 static DEFINE_MUTEX(pw_mutex);
 
-/* crypto tfm for sha256 (allocated at init, freed at exit) */
+/* crypto tfm for sha256 */
 static struct crypto_shash *sha_tfm = NULL;
+
+/* --- Lista dispositivi attivi --- */
+struct snap_device {
+    char dev_name[64];
+    struct list_head list;
+};
+
+static LIST_HEAD(snap_dev_list);
+static DEFINE_MUTEX(snap_dev_mutex);
 
 /* --- Prototipi --- */
 static long bdev_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
@@ -67,10 +77,8 @@ static int compute_sha256(const char *buf, size_t len, u8 *out)
 
     ret = crypto_shash_init(sdesc);
     if (ret) goto out;
-
     ret = crypto_shash_update(sdesc, buf, len);
     if (ret) goto out;
-
     ret = crypto_shash_final(sdesc, out);
 
 out:
@@ -96,7 +104,6 @@ static int set_password_from_user(const char *pw, size_t pwlen)
     pw_set = true;
     mutex_unlock(&pw_mutex);
 
-    /* zero tmp_hash just in case */
     memzero_explicit(tmp_hash, PW_HASH_LEN);
     return 0;
 }
@@ -125,6 +132,47 @@ static bool verify_password_from_user(const char *pw, size_t pwlen)
     return match;
 }
 
+/* --- Lista dispositivi helpers --- */
+static struct snap_device *find_snap_device(const char *dev_name)
+{
+    struct snap_device *dev;
+
+    list_for_each_entry(dev, &snap_dev_list, list) {
+        if (strcmp(dev->dev_name, dev_name) == 0)
+            return dev;
+    }
+    return NULL;
+}
+
+static int add_snap_device(const char *dev_name)
+{
+    struct snap_device *dev;
+
+    if (find_snap_device(dev_name))
+        return -EEXIST;
+
+    dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+    if (!dev)
+        return -ENOMEM;
+
+    strscpy(dev->dev_name, dev_name, sizeof(dev->dev_name));
+    list_add(&dev->list, &snap_dev_list);
+    return 0;
+}
+
+static int remove_snap_device(const char *dev_name)
+{
+    struct snap_device *dev;
+
+    dev = find_snap_device(dev_name);
+    if (!dev)
+        return -ENOENT;
+
+    list_del(&dev->list);
+    kfree(dev);
+    return 0;
+}
+
 /* --- Implementazione --- */
 
 static int bdev_open(struct inode *inode, struct file *file)
@@ -142,24 +190,21 @@ static int bdev_release(struct inode *inode, struct file *file)
 static long bdev_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
     struct snap_args args;
-    int ret;
+    int ret = 0;
     size_t pwlen;
 
-    /* richiediamo CAP_SYS_ADMIN (root) */
     if (!capable(CAP_SYS_ADMIN))
         return -EPERM;
 
     if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
         return -EFAULT;
 
-    /* sicurezza: assicurarsi che strings siano terminate */
     args.dev_name[sizeof(args.dev_name)-1] = '\0';
     args.password[sizeof(args.password)-1] = '\0';
     pwlen = strnlen(args.password, sizeof(args.password));
 
     switch (cmd) {
     case SNAP_ACTIVATE:
-        /* Se password non impostata, la prima activation la imposta */
         if (!pw_set) {
             ret = set_password_from_user(args.password, pwlen);
             if (ret) {
@@ -168,24 +213,21 @@ static long bdev_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
             }
             pr_info("%s: password set (first-time). Snapshot ACTIVATED on %s\n",
                     MOD_NAME, args.dev_name);
-            /* TODO: registrare il device e preparare struttura snapshot */
-            ret = 0;
-            goto out_zero_pw;
-        }
-
-        /* password già impostata: verifica */
-        if (!verify_password_from_user(args.password, pwlen)) {
+        } else if (!verify_password_from_user(args.password, pwlen)) {
             pr_warn("%s: SNAP_ACTIVATE authentication failed for device %s\n",
                     MOD_NAME, args.dev_name);
             ret = -EACCES;
             goto out_zero_pw;
         }
 
-        pr_info("%s: SNAP_ACTIVATE authenticated for device %s\n",
-                MOD_NAME, args.dev_name);
-        /* TODO: registrare il device e preparare struttura snapshot */
-        ret = 0;
-        goto out_zero_pw;
+        mutex_lock(&snap_dev_mutex);
+        ret = add_snap_device(args.dev_name);
+        mutex_unlock(&snap_dev_mutex);
+        if (ret == -EEXIST)
+            pr_warn("%s: device %s already active\n", MOD_NAME, args.dev_name);
+        else if (ret == 0)
+            pr_info("%s: device %s added to active snapshot list\n", MOD_NAME, args.dev_name);
+        break;
 
     case SNAP_DEACTIVATE:
         if (!pw_set) {
@@ -201,19 +243,21 @@ static long bdev_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
             goto out_zero_pw;
         }
 
-        pr_info("%s: SNAP_DEACTIVATE authenticated for device %s\n",
-                MOD_NAME, args.dev_name);
-        /* TODO: rimuovere dalla lista dispositivi attivi */
-        ret = 0;
-        goto out_zero_pw;
+        mutex_lock(&snap_dev_mutex);
+        ret = remove_snap_device(args.dev_name);
+        mutex_unlock(&snap_dev_mutex);
+        if (ret == -ENOENT)
+            pr_warn("%s: device %s not found in active list\n", MOD_NAME, args.dev_name);
+        else if (ret == 0)
+            pr_info("%s: device %s removed from active snapshot list\n", MOD_NAME, args.dev_name);
+        break;
 
     default:
         ret = -ENOTTY;
-        goto out_zero_pw;
+        break;
     }
 
 out_zero_pw:
-    /* Clear sensitive data in kernel stack copy before returning */
     memzero_explicit(args.password, sizeof(args.password));
     return ret;
 }
@@ -226,7 +270,6 @@ static int __init bdevsnapshot_init(void)
 
     pr_info("%s: loading block-device snapshot module\n", MOD_NAME);
 
-    /* initialize sha tfm */
     sha_tfm = crypto_alloc_shash("sha256", 0, 0);
     if (IS_ERR(sha_tfm)) {
         pr_err("%s: crypto_alloc_shash failed\n", MOD_NAME);
@@ -234,7 +277,6 @@ static int __init bdevsnapshot_init(void)
         return PTR_ERR(sha_tfm);
     }
 
-    /* 1) Alloca major/minor dinamico */
     ret = alloc_chrdev_region(&dev_num, 0, 1, MOD_NAME);
     if (ret) {
         pr_err("%s: alloc_chrdev_region failed: %d\n", MOD_NAME, ret);
@@ -243,7 +285,6 @@ static int __init bdevsnapshot_init(void)
         return ret;
     }
 
-    /* 2) Inizializza e registra la cdev */
     cdev_init(&bdev_cdev, &bdev_fops);
     bdev_cdev.owner = THIS_MODULE;
 
@@ -256,7 +297,6 @@ static int __init bdevsnapshot_init(void)
         return ret;
     }
 
-    /* 3) Crea classe e device node /dev/bdev_snapshot */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)
     bdev_class = class_create(THIS_MODULE, "bdev_snapshot");
 #else
@@ -291,12 +331,20 @@ static int __init bdevsnapshot_init(void)
 
 static void __exit bdevsnapshot_exit(void)
 {
-    /* zero stored hash before unload */
+    struct snap_device *dev, *tmp;
+
     mutex_lock(&pw_mutex);
     if (pw_set)
         memzero_explicit(pw_hash, PW_HASH_LEN);
     pw_set = false;
     mutex_unlock(&pw_mutex);
+
+    mutex_lock(&snap_dev_mutex);
+    list_for_each_entry_safe(dev, tmp, &snap_dev_list, list) {
+        list_del(&dev->list);
+        kfree(dev);
+    }
+    mutex_unlock(&snap_dev_mutex);
 
     device_destroy(bdev_class, dev_num);
     class_destroy(bdev_class);
@@ -316,5 +364,5 @@ module_exit(bdevsnapshot_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Matteo Basili <matteo.basili@students.uniroma2.eu>");
-MODULE_DESCRIPTION("Snapshot service for block devices hosting file systems - password auth (F3)");
+MODULE_DESCRIPTION("Snapshot service for block devices hosting file systems - device list (F4)");
 
