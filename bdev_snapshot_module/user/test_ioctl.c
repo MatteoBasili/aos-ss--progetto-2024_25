@@ -5,7 +5,7 @@
 #include <errno.h>
 #include <sys/ioctl.h>
 
-#include "bdev_snapshot.h"
+#include "include/uapi/bdev_snapshot_uapi.h"
 
 static void try_ioctl(int fd, unsigned long code, const char *name, const char *dev, const char *pw)
 {
