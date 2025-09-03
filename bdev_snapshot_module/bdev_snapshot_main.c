@@ -20,7 +20,7 @@ static struct device *bdev_device;
 static const struct file_operations bdev_fops = {
     .owner          = THIS_MODULE,
     .open           = bdev_open,
-    .release        = bdev_release,
+    .release        = bdevsnap_release,
     .unlocked_ioctl = bdev_ioctl,
 #ifdef CONFIG_COMPAT
     .compat_ioctl   = bdev_ioctl,
@@ -70,10 +70,19 @@ static int __init bdevsnapshot_init(void)
         goto err_class;
     }
 
+    /* Inizializza kprobe per intercettare submit_bio */
+    ret = bdev_kprobe_init();
+    if (ret) {
+        pr_err("%s: kprobe init failed: %d\n", MOD_NAME, ret);
+        goto err_dev;
+    }
+
     pr_info("%s: /dev/bdev_snapshot ready (major=%d minor=%d)\n",
             MOD_NAME, MAJOR(dev_num), MINOR(dev_num));
     return 0;
 
+err_dev:
+    device_destroy(bdev_class, dev_num);
 err_class:
     class_destroy(bdev_class);
 err_cdev:
@@ -87,6 +96,9 @@ err_pw:
 
 static void __exit bdevsnapshot_exit(void)
 {
+    /* rimuovi kprobe prima di distruggere other resources */
+    bdev_kprobe_exit();
+
     clear_password();
     clear_snap_devices();
 

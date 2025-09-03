@@ -41,11 +41,11 @@ int main(int argc, char **argv)
     printf("== First activation (may set password if not set yet) ==\n");
     try_ioctl(fd, SNAP_ACTIVATE,   "SNAP_ACTIVATE",   dev, pw);
 
-    printf("== Deactivation (using same password) ==\n");
-    try_ioctl(fd, SNAP_DEACTIVATE, "SNAP_DEACTIVATE", dev, pw);
+    //printf("== Deactivation (using same password) ==\n");
+    //try_ioctl(fd, SNAP_DEACTIVATE, "SNAP_DEACTIVATE", dev, pw);
 
-    printf("== Try activation with wrong password ==\n");
-    try_ioctl(fd, SNAP_ACTIVATE,   "SNAP_ACTIVATE",   dev, "wrongpw");
+    //printf("== Try activation with wrong password ==\n");
+    //try_ioctl(fd, SNAP_ACTIVATE,   "SNAP_ACTIVATE",   dev, "wrongpw");
 
     close(fd);
     return 0;

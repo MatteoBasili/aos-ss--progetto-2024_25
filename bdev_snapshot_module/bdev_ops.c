@@ -64,7 +64,7 @@ int bdev_open(struct inode *inode, struct file *file)
     return 0;
 }
 
-int bdev_release(struct inode *inode, struct file *file)
+int bdevsnap_release(struct inode *inode, struct file *file)
 {
     pr_info("%s: device closed\n", MOD_NAME);
     return 0;
