@@ -187,25 +187,47 @@ out:
 	return ret;
 }
 
-/* Worker di copia-before-write */
+/* Worker di copia-before-write (versione migliorata):
+ * - legge fino a 'nsectors' settori in un unico buffer (limitato)
+ * - per ogni settore controlla saved_map e salva il file block_<lba>.bin
+ * - minimizza le chiamate bio multiple
+ *
+ * Nota: le allocazioni qui sono in GFP_KERNEL (safety: siamo in workqueue)
+ */
+
+#define BYTES_PER_SECTOR 512
+/* Limite pratico per non occupare troppa memoria nel worker:
+ * es: 4096 settori * 512 = 2 MiB */
+#define MAX_SECTORS_PER_WORK (4096)
+
 static void do_copy_work(struct work_struct *w)
 {
     struct copy_work *cw = container_of(w, struct copy_work, work);
-    struct snap_store *st;
+    struct snap_store *st = NULL;
     sector_t lba = cw->sector;
     unsigned int n = cw->nsectors;
-    int ret;
+    int ret = 0;
     struct bdev_handle *handle = NULL;
     struct block_device *bdev = NULL;
+    void *buf = NULL;
+    unsigned int to_read;
+    unsigned int bytes;
+    unsigned int i;
 
-    /* Apri il block_device usando il dev_t memorizzato */
+    /* Sanity bounds */
+    if (!n) {
+        pr_warn("%s: copy_work: zero nsectors\n", MOD_NAME);
+        goto out;
+    }
+
+    /* Apertura bdev (refcount safe) */
     handle = bdev_open_by_dev(cw->dev, FMODE_READ, NULL, NULL);
     if (IS_ERR(handle)) {
         pr_warn("%s: bdev_open_by_dev failed for dev=%u:%u\n",
                 MOD_NAME, MAJOR(cw->dev), MINOR(cw->dev));
+        handle = NULL;
         goto out;
     }
-
     bdev = handle->bdev;
     if (!bdev) {
         pr_warn("%s: handle->bdev is NULL for dev=%u:%u\n",
@@ -220,42 +242,89 @@ static void do_copy_work(struct work_struct *w)
 
     /* Assicura che la directory dello snapshot esista */
     ret = ensure_dirs(st, cw->disk_name, ktime_get_ns());
-    if (ret)
+    if (ret) {
+        pr_warn("%s: ensure_dirs failed: %d\n", MOD_NAME, ret);
         goto out;
+    }
 
-    /* Buffer per leggere i blocchi */
-    const unsigned int bsz = 512;
-    void *buf = vmalloc(n * bsz);
-    if (!buf)
+    /* Limitiamo la lettura per lavoro per non allocare troppa memoria */
+    to_read = min_t(unsigned int, n, MAX_SECTORS_PER_WORK);
+    bytes = to_read * BYTES_PER_SECTOR;
+
+    buf = vmalloc(bytes);
+    if (!buf) {
+        pr_warn("%s: vmalloc(%u) failed\n", MOD_NAME, bytes);
         goto out;
+    }
 
-    for (sector_t s = lba; s < lba + n; s++) {
-        /* Se il blocco è già salvato, salta */
-        if (xa_load(&st->saved_map, s))
+    /* Leggi l'intervallo: read_sectors già supporta nsectors>1 */
+    ret = read_sectors(bdev, lba, to_read, buf);
+    if (ret) {
+        pr_warn("%s: read_sectors failed lba=%llu n=%u ret=%d\n",
+                MOD_NAME, (unsigned long long)lba, to_read, ret);
+        goto out_free;
+    }
+
+    /* Per ogni settore nel buffer:
+     * - se non salvato (saved_map), memorizza il file block_<lba+i>.bin
+     * - segnalo con xa_store per non salvarlo più volte
+     *
+     * Nota: xa_store può fallire se c'è concorrenza; in quel caso
+     * saltiamo il settore (best-effort).
+     */
+    for (i = 0; i < to_read; i++) {
+        sector_t this_lba = lba + i;
+        void *sector_ptr = buf + (i * BYTES_PER_SECTOR);
+
+        /* Se già salvato, salta */
+        if (xa_load(&st->saved_map, this_lba))
             continue;
 
-        /* Segna il blocco come salvato nella xarray */
-        if (xa_store(&st->saved_map, s, XA_ZERO_ENTRY, GFP_KERNEL))
+        /* marca come salvato (XA_ZERO_ENTRY è un segnaposto) */
+        if (xa_store(&st->saved_map, this_lba, XA_ZERO_ENTRY, GFP_KERNEL)) {
+            /* store fallito: possibile race, salta */
             continue;
+        }
 
-        ret = read_sectors(bdev, s, 1, buf);
-        if (!ret)
-            ret = save_block_file(st, s, buf, bsz);
-
+        ret = save_block_file(st, this_lba, sector_ptr, BYTES_PER_SECTOR);
         if (ret) {
             pr_warn("%s: save lba=%llu on %s failed: %d\n",
-                    MOD_NAME, (unsigned long long)s, cw->disk_name, ret);
+                    MOD_NAME, (unsigned long long)this_lba, cw->disk_name, ret);
+            /* In caso di fallimento reale, possiamo rimuovere l'entry dalla xarray
+             * così che future writes possano ritentare; opzionale:
+             */
+            xa_erase(&st->saved_map, this_lba);
         } else {
             atomic64_inc(&st->saved_blocks);
         }
     }
 
-    vfree(buf);
+    /*
+     * Se ci sono ancora più settori oltre 'to_read', generiamo e
+     * accodiamo un nuovo lavoro per il resto.
+     */
+    if (n > to_read) {
+        struct copy_work *cw2 = kzalloc(sizeof(*cw2), GFP_KERNEL);
+        if (cw2) {
+            INIT_WORK(&cw2->work, do_copy_work);
+            strscpy(cw2->disk_name, cw->disk_name, sizeof(cw2->disk_name));
+            cw2->dev = cw->dev;
+            cw2->sector = lba + to_read;
+            cw2->nsectors = n - to_read;
+            queue_work(snap_wq, &cw2->work);
+            /* nota: se allocazione fallisce, i settori rimanenti saranno persi (best-effort).
+             * Potresti loggare qui per debugging.
+             */
+        } else {
+            pr_warn("%s: failed to alloc cw2 for remaining sectors\n", MOD_NAME);
+        }
+    }
 
+out_free:
+    vfree(buf);
 out:
     if (handle)
         bdev_release(handle);
-
     kfree(cw);
 }
 
