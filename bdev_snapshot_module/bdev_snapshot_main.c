@@ -6,8 +6,6 @@
 #include <linux/version.h>
 
 #include "bdev_snapshot.h"
-#include "bdev_password.h"
-#include "bdev_store.h"
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
 #error "This module requires at least the 6.3.0 kernel version."
@@ -34,21 +32,21 @@ static int __init bdevsnapshot_init(void)
 
 	pr_info("%s: loading module\n", MOD_NAME);
 
-	/* password subsystem */
-	ret = password_init();
+	/* --- Auth subsystem --- */
+	ret = bdev_auth_init();
 	if (ret) {
-		pr_err("%s: password_init failed: %d\n", MOD_NAME, ret);
+		pr_err("%s: bdev_auth_init failed: %d\n", MOD_NAME, ret);
 		return ret;
 	}
 
-	/* init store (F7) */
-	ret = bdev_store_global_init();
+	/* --- Store snapshot --- */
+	/*ret = bdev_store_global_init();
 	if (ret) {
 		pr_err("%s: bdev_store_global_init failed: %d\n", MOD_NAME, ret);
 		goto err_pw;
-	}
+	}*/
 
-	/* character device */
+	/* --- Character device --- */
 	ret = alloc_chrdev_region(&dev_num, 0, 1, MOD_NAME);
 	if (ret) {
 		pr_err("%s: alloc_chrdev_region failed: %d\n", MOD_NAME, ret);
@@ -64,9 +62,9 @@ static int __init bdevsnapshot_init(void)
 	}
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)
-	bdev_class = class_create(THIS_MODULE, "bdev_snapshot");
+	bdev_class = class_create(THIS_MODULE, "bdev_snapctl");
 #else
-	bdev_class = class_create("bdev_snapshot");
+	bdev_class = class_create("bdev_snapctl");
 #endif
 	if (IS_ERR(bdev_class)) {
 		ret = PTR_ERR(bdev_class);
@@ -74,25 +72,25 @@ static int __init bdevsnapshot_init(void)
 		goto err_cdev;
 	}
 
-	bdev_device = device_create(bdev_class, NULL, dev_num, NULL, "bdev_snapshot");
+	bdev_device = device_create(bdev_class, NULL, dev_num, NULL, "bdev_snapctl");
 	if (IS_ERR(bdev_device)) {
 		ret = PTR_ERR(bdev_device);
 		pr_err("%s: device_create failed: %d\n", MOD_NAME, ret);
 		goto err_class;
 	}
 
-	/* Inizializza kprobe per intercettare submit_bio */
+	/* --- Kprobe per intercettare submit_bio --- */
 	ret = bdev_kprobe_init();
 	if (ret) {
 		pr_err("%s: kprobe init failed: %d\n", MOD_NAME, ret);
 		goto err_dev;
 	}
 
-	pr_info("%s: /dev/bdev_snapshot ready (major=%d minor=%d)\n",
+	pr_info("%s: /dev/bdev_snapctl ready (major=%d minor=%d)\n",
 		MOD_NAME, MAJOR(dev_num), MINOR(dev_num));
 	return 0;
 
-	/* error paths: pulizia appropriata */
+	/* --- Error paths --- */
 err_dev:
 	device_destroy(bdev_class, dev_num);
 err_class:
@@ -102,21 +100,21 @@ err_cdev:
 err_chrdev:
 	unregister_chrdev_region(dev_num, 1);
 err_store:
-	bdev_store_global_exit();
-err_pw:
-	password_exit();
+	//bdev_store_global_exit();
+//err_pw:
+	bdev_auth_exit();
 	return ret;
 }
 
 static void __exit bdevsnapshot_exit(void)
 {
-	/* rimuovi kprobe prima di distruggere altre risorse */
+	/* Rimuovi kprobe prima di distruggere altre risorse */
 	bdev_kprobe_exit();
 
-	/* cleanup store (F7) */
-	bdev_store_global_exit();
+	/* Cleanup store */
+	//bdev_store_global_exit();
 
-	clear_password();
+	/* Pulizia e snapshot */
 	clear_snap_devices();
 
 	device_destroy(bdev_class, dev_num);
@@ -124,7 +122,7 @@ static void __exit bdevsnapshot_exit(void)
 	cdev_del(&bdev_cdev);
 	unregister_chrdev_region(dev_num, 1);
 
-	password_exit();
+	bdev_auth_exit();
 
 	pr_info("%s: module removed\n", MOD_NAME);
 }
@@ -134,5 +132,5 @@ module_exit(bdevsnapshot_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Matteo Basili <matteo.basili@students.uniroma2.eu>");
-MODULE_DESCRIPTION("Snapshot service for block devices hosting file systems - modular version");
+MODULE_DESCRIPTION("Snapshot service for block devices hosting file systems");
 

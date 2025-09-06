@@ -5,11 +5,10 @@
  * Si aggancia a "submit_bio".
  *
  * NOTE:
- *  - Il pre_handler è estremamente leggero: verifica tipo di bio,
- *    ottiene disk_name e controlla se il device è attivo.
- *  - Non vengono effettuate allocazioni, IO o altre operazioni
- *    bloccanti qui. Tutto il salvataggio viene spostato in F7/F8
- *    tramite snapshot_queue_blocks().
+ *  - Il pre_handler è leggero: controlla il tipo di bio,
+ *    ottiene disk_name e verifica se il device è attivo.
+ *  - Nessuna allocazione o IO bloccante: il salvataggio è delegato
+ *    alla workqueue tramite snapshot_queue_blocks().
  */
 
 #include <linux/module.h>
@@ -45,14 +44,13 @@ static int is_write_bio(const struct bio *bio)
 	case REQ_OP_WRITE:
 	case REQ_OP_WRITE_ZEROES:
 	case REQ_OP_DISCARD:
-		/* opzionale: conta come “write” logica */
 		return 1;
 	default:
 		return 0;
 	}
 }
 
-/* pre_handler: viene eseguito prima della chiamata a submit_bio() */
+/* pre_handler: eseguito prima di submit_bio() */
 static int submit_bio_pre(struct kprobe *p, struct pt_regs *regs)
 {
 	struct bio *bio = (struct bio *)PT_REGS_PARM1(regs);
@@ -64,7 +62,6 @@ static int submit_bio_pre(struct kprobe *p, struct pt_regs *regs)
 	if (!bio)
 		return 0;
 
-	/* Solo write */
 	if (!is_write_bio(bio))
 		return 0;
 
@@ -72,15 +69,15 @@ static int submit_bio_pre(struct kprobe *p, struct pt_regs *regs)
 	if (!bdev || !bdev->bd_disk)
 		return 0;
 
-	disk_name = bdev->bd_disk->disk_name; /* es: "loop0", "sda" */
+	disk_name = bdev->bd_disk->disk_name;
 	if (!disk_name)
 		return 0;
 
-	/* Controlla se questo disk è monitorato */
+	/* Verifica se il device è monitorato */
 	if (!snapdev_is_active_name(disk_name))
 		return 0;
 
-	/* Marca la prima scrittura (timestamp) */
+	/* Marca prima scrittura */
 	snapdev_mark_started(disk_name, ktime_get_ns());
 
 	first_sector = bio->bi_iter.bi_sector;
@@ -89,12 +86,8 @@ static int submit_bio_pre(struct kprobe *p, struct pt_regs *regs)
 	pr_debug("%s: intercepted WRITE on %s sector=%llu nsectors=%u\n",
 	         MOD_NAME, disk_name, (unsigned long long)first_sector, nsectors);
 
-	/*
-	 * Accoda salvataggio dei blocchi (best-effort) su workqueue.
-	 * snapshot_queue_blocks si occupa di prendere una ref sul bdev
-	 * e creare il lavoro in modo safe (GFP_ATOMIC).
-	 */
-	snapshot_queue_blocks(bdev, disk_name, first_sector, nsectors);
+	/* Accoda lavoro su workqueue */
+	//snapshot_queue_blocks(bdev, disk_name, first_sector, nsectors);
 
 	return 0;
 }

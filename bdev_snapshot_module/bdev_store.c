@@ -9,9 +9,9 @@
 #include <linux/bio.h>
 #include <linux/vmalloc.h>
 #include <linux/workqueue.h>
-#include <linux/mount.h>   /* per mnt_idmap() */
+#include <linux/mount.h>
+
 #include "bdev_snapshot.h"
-#include "bdev_store.h"
 
 /* Workqueue globale */
 static struct workqueue_struct *snap_wq;
@@ -36,6 +36,7 @@ struct copy_work {
 
 /* ==== Funzioni di supporto ==== */
 
+/* Crea /snapshot se non esiste */
 static int ensure_root_dir(void)
 {
 	struct path p;
@@ -65,6 +66,7 @@ static int ensure_root_dir(void)
 	return 0;
 }
 
+/* Crea /snapshot/<device>_<timestamp>/blocks */
 static int ensure_dirs(struct snap_store *st, const char *disk_name, u64 t_ns)
 {
 	int ret;
@@ -87,14 +89,15 @@ static int ensure_dirs(struct snap_store *st, const char *disk_name, u64 t_ns)
 	if (!secs)
 		secs = div_u64(t_ns, 1000000000ULL);
 
-	snprintf(st->dir, sizeof(st->dir), SNAP_ROOT_DIR"/%s_%llu",
+	snprintf(st->dir, sizeof(st->dir), SNAP_ROOT_DIR "/%s_%llu/blocks",
 	         disk_name, (unsigned long long)secs);
 
-	/* crea la sottodirectory se non esiste */
+	/* crea la directory /snapshot/<device>_<timestamp>/blocks se non esiste */
 	{
 		struct path parent;
 		struct dentry *dentry;
 		umode_t mode = 0700;
+
 		ret = kern_path(SNAP_ROOT_DIR, LOOKUP_DIRECTORY, &parent);
 		if (ret) {
 			mutex_unlock(&st->dir_mutex);
@@ -123,6 +126,7 @@ static int ensure_dirs(struct snap_store *st, const char *disk_name, u64 t_ns)
 	return 0;
 }
 
+/* Salva un blocco su file */
 static int save_block_file(struct snap_store *st, sector_t lba, const void *buf, size_t len)
 {
 	char path[SNAP_DIR_MAX + 64];
@@ -142,12 +146,17 @@ static int save_block_file(struct snap_store *st, sector_t lba, const void *buf,
 	return ret < 0 ? ret : 0;
 }
 
+/* Legge nsectors dal bdev in buf */
 static int read_sectors(struct block_device *bdev, sector_t start, unsigned int nsectors, void *buf)
 {
-	struct bio *bio = bio_alloc(bdev, 1, REQ_OP_READ | REQ_SYNC, GFP_KERNEL);
+	struct bio *bio;
 	struct page *page;
 	int ret;
+	const unsigned int bytes_per_sector = 512;
+	unsigned int total_bytes = nsectors * bytes_per_sector;
+	unsigned int done = 0;
 
+	bio = bio_alloc(bdev, 1, GFP_KERNEL, 0);
 	if (!bio)
 		return -ENOMEM;
 
@@ -156,10 +165,6 @@ static int read_sectors(struct block_device *bdev, sector_t start, unsigned int 
 		bio_put(bio);
 		return -ENOMEM;
 	}
-
-	const unsigned int bytes_per_sector = 512;
-	unsigned int total_bytes = nsectors * bytes_per_sector;
-	unsigned int done = 0;
 
 	while (done < total_bytes) {
 		unsigned int chunk = min_t(unsigned int, total_bytes - done, PAGE_SIZE);
@@ -181,154 +186,100 @@ static int read_sectors(struct block_device *bdev, sector_t start, unsigned int 
 	}
 
 	ret = 0;
+
 out:
 	__free_page(page);
 	bio_put(bio);
 	return ret;
 }
 
-/* Worker di copia-before-write (versione migliorata):
- * - legge fino a 'nsectors' settori in un unico buffer (limitato)
- * - per ogni settore controlla saved_map e salva il file block_<lba>.bin
- * - minimizza le chiamate bio multiple
- *
- * Nota: le allocazioni qui sono in GFP_KERNEL (safety: siamo in workqueue)
- */
-
 #define BYTES_PER_SECTOR 512
-/* Limite pratico per non occupare troppa memoria nel worker:
- * es: 4096 settori * 512 = 2 MiB */
 #define MAX_SECTORS_PER_WORK (4096)
 
+/* Worker di copia-before-write */
 static void do_copy_work(struct work_struct *w)
 {
-    struct copy_work *cw = container_of(w, struct copy_work, work);
-    struct snap_store *st = NULL;
-    sector_t lba = cw->sector;
-    unsigned int n = cw->nsectors;
-    int ret = 0;
-    struct bdev_handle *handle = NULL;
-    struct block_device *bdev = NULL;
-    void *buf = NULL;
-    unsigned int to_read;
-    unsigned int bytes;
-    unsigned int i;
+	struct copy_work *cw = container_of(w, struct copy_work, work);
+	struct snap_store *st = NULL;
+	sector_t lba = cw->sector;
+	unsigned int n = cw->nsectors;
+	int ret = 0;
+	struct block_device *bdev = NULL;
+	void *buf = NULL;
 
-    /* Sanity bounds */
-    if (!n) {
-        pr_warn("%s: copy_work: zero nsectors\n", MOD_NAME);
-        goto out;
-    }
+	if (!n)
+		goto out;
 
-    /* Apertura bdev (refcount safe) */
-    handle = bdev_open_by_dev(cw->dev, FMODE_READ, NULL, NULL);
-    if (IS_ERR(handle)) {
-        pr_warn("%s: bdev_open_by_dev failed for dev=%u:%u\n",
-                MOD_NAME, MAJOR(cw->dev), MINOR(cw->dev));
-        handle = NULL;
-        goto out;
-    }
-    bdev = handle->bdev;
-    if (!bdev) {
-        pr_warn("%s: handle->bdev is NULL for dev=%u:%u\n",
-                MOD_NAME, MAJOR(cw->dev), MINOR(cw->dev));
-        goto out;
-    }
+	/* Apri bdev */
+	bdev = blkdev_get_by_dev(cw->dev, FMODE_READ, NULL);
+	if (IS_ERR(bdev)) {
+		bdev = NULL;
+		goto out;
+	}
 
-    /* Ottieni o crea lo store del device */
-    st = snap_store_get_or_create(cw->disk_name, ktime_get_ns());
-    if (!st)
-        goto out;
+	st = snap_store_get_or_create(cw->disk_name, ktime_get_ns());
+	if (!st)
+		goto out_put;
 
-    /* Assicura che la directory dello snapshot esista */
-    ret = ensure_dirs(st, cw->disk_name, ktime_get_ns());
-    if (ret) {
-        pr_warn("%s: ensure_dirs failed: %d\n", MOD_NAME, ret);
-        goto out;
-    }
+	ret = ensure_dirs(st, cw->disk_name, ktime_get_ns());
+	if (ret)
+		goto out_put;
 
-    /* Limitiamo la lettura per lavoro per non allocare troppa memoria */
-    to_read = min_t(unsigned int, n, MAX_SECTORS_PER_WORK);
-    bytes = to_read * BYTES_PER_SECTOR;
+	unsigned int to_read = min(n, MAX_SECTORS_PER_WORK);
+	unsigned int bytes = to_read * BYTES_PER_SECTOR;
 
-    buf = vmalloc(bytes);
-    if (!buf) {
-        pr_warn("%s: vmalloc(%u) failed\n", MOD_NAME, bytes);
-        goto out;
-    }
+	buf = vmalloc(bytes);
+	if (!buf)
+		goto out_put;
 
-    /* Leggi l'intervallo: read_sectors già supporta nsectors>1 */
-    ret = read_sectors(bdev, lba, to_read, buf);
-    if (ret) {
-        pr_warn("%s: read_sectors failed lba=%llu n=%u ret=%d\n",
-                MOD_NAME, (unsigned long long)lba, to_read, ret);
-        goto out_free;
-    }
+	ret = read_sectors(bdev, lba, to_read, buf);
+	if (ret) {
+		pr_warn("%s: read_sectors failed lba=%llu n=%u\n",
+		        MOD_NAME, (unsigned long long)lba, to_read);
+		goto out_free;
+	}
 
-    /* Per ogni settore nel buffer:
-     * - se non salvato (saved_map), memorizza il file block_<lba+i>.bin
-     * - segnalo con xa_store per non salvarlo più volte
-     *
-     * Nota: xa_store può fallire se c'è concorrenza; in quel caso
-     * saltiamo il settore (best-effort).
-     */
-    for (i = 0; i < to_read; i++) {
-        sector_t this_lba = lba + i;
-        void *sector_ptr = buf + (i * BYTES_PER_SECTOR);
+	for (unsigned int i = 0; i < to_read; i++) {
+		sector_t this_lba = lba + i;
+		void *sector_ptr = buf + i * BYTES_PER_SECTOR;
 
-        /* Se già salvato, salta */
-        if (xa_load(&st->saved_map, this_lba))
-            continue;
+		if (xa_load(&st->saved_map, this_lba))
+			continue;
 
-        /* marca come salvato (XA_ZERO_ENTRY è un segnaposto) */
-        if (xa_store(&st->saved_map, this_lba, XA_ZERO_ENTRY, GFP_KERNEL)) {
-            /* store fallito: possibile race, salta */
-            continue;
-        }
+		if (xa_store(&st->saved_map, this_lba, XA_ZERO_ENTRY, GFP_KERNEL))
+			continue;
 
-        ret = save_block_file(st, this_lba, sector_ptr, BYTES_PER_SECTOR);
-        if (ret) {
-            pr_warn("%s: save lba=%llu on %s failed: %d\n",
-                    MOD_NAME, (unsigned long long)this_lba, cw->disk_name, ret);
-            /* In caso di fallimento reale, possiamo rimuovere l'entry dalla xarray
-             * così che future writes possano ritentare; opzionale:
-             */
-            xa_erase(&st->saved_map, this_lba);
-        } else {
-            atomic64_inc(&st->saved_blocks);
-        }
-    }
+		ret = save_block_file(st, this_lba, sector_ptr, BYTES_PER_SECTOR);
+		if (ret)
+			xa_erase(&st->saved_map, this_lba);
+		else
+			atomic64_inc(&st->saved_blocks);
+	}
 
-    /*
-     * Se ci sono ancora più settori oltre 'to_read', generiamo e
-     * accodiamo un nuovo lavoro per il resto.
-     */
-    if (n > to_read) {
-        struct copy_work *cw2 = kzalloc(sizeof(*cw2), GFP_KERNEL);
-        if (cw2) {
-            INIT_WORK(&cw2->work, do_copy_work);
-            strscpy(cw2->disk_name, cw->disk_name, sizeof(cw2->disk_name));
-            cw2->dev = cw->dev;
-            cw2->sector = lba + to_read;
-            cw2->nsectors = n - to_read;
-            queue_work(snap_wq, &cw2->work);
-            /* nota: se allocazione fallisce, i settori rimanenti saranno persi (best-effort).
-             * Potresti loggare qui per debugging.
-             */
-        } else {
-            pr_warn("%s: failed to alloc cw2 for remaining sectors\n", MOD_NAME);
-        }
-    }
+	if (n > to_read) {
+		struct copy_work *cw2 = kzalloc(sizeof(*cw2), GFP_KERNEL);
+		if (cw2) {
+			INIT_WORK(&cw2->work, do_copy_work);
+			strscpy(cw2->disk_name, cw->disk_name, sizeof(cw2->disk_name));
+			cw2->dev = cw->dev;
+			cw2->sector = lba + to_read;
+			cw2->nsectors = n - to_read;
+			queue_work(snap_wq, &cw2->work);
+		} else {
+			pr_warn("%s: failed to alloc cw2 for remaining sectors\n", MOD_NAME);
+		}
+	}
 
 out_free:
-    vfree(buf);
+	vfree(buf);
+out_put:
+	if (bdev)
+		blkdev_put(bdev, FMODE_READ);
 out:
-    if (handle)
-        bdev_release(handle);
-    kfree(cw);
+	kfree(cw);
 }
 
-/* API per il kprobe: accoda lavoro */
+/* Accoda lavoro da kprobe */
 void snapshot_queue_blocks(struct block_device *bdev,
                            const char *disk_name,
                            sector_t sector,
@@ -378,7 +329,7 @@ struct snap_store *snap_store_get_or_create(const char *disk_name, u64 t_ns)
 	return &pd->store;
 }
 
-/* ===== init/exit globali ===== */
+/* ===== init/exit globali ==== */
 int bdev_store_global_init(void)
 {
 	snap_wq = alloc_workqueue(MOD_NAME "_wq", WQ_UNBOUND | WQ_MEM_RECLAIM, 1);
