@@ -3,18 +3,18 @@ obj-m := bdev_snapshot.o
 
 # Sorgenti del modulo
 bdev_snapshot-objs := \
-	bdev_snapshot_main.o \
-	bdev_ops.o \
-	bdev_auth.o \
-	bdev_list.o \
-	bdev_kprobe.o
+	src/bdev_snapshot_main.o \
+	src/bdev_ops.o \
+	src/bdev_auth.o \
+	src/bdev_list.o \
+	src/bdev_kprobe.o
 
 # Aggiungi il path include/
 EXTRA_CFLAGS := -I$(PWD)/include
 
 # Compilazione di default
 all:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules EXTRA_CFLAGS="$(EXTRA_CFLAGS)"
+	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules EXTRA_CFLAGS="$(EXTRA_CFLAGS)"
 
 # Carica il modulo
 load-snap-mod:
@@ -26,5 +26,5 @@ remove-snap-mod:
 
 # Pulizia build
 clean:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
 

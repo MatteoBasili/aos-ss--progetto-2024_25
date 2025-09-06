@@ -4,16 +4,17 @@
 #include <linux/ioctl.h>
 
 /* --- Costanti --- */
-#define DEV_NAME_LEN       64
+#define DEV_NAME_LEN_MAX   64
 #define SNAP_PASSWORD_MAX  64
 
 struct pw_args {
     char password[SNAP_PASSWORD_MAX];
+    size_t password_len;
 };
 
 /* --- Struct scambiata via ioctl --- */
 struct snap_args {
-    char dev_name[DEV_NAME_LEN];              /* Nome device, es. "loop0" */
+    char dev_name[DEV_NAME_LEN_MAX];              /* Nome device, es. "loop0" */
     char password[SNAP_PASSWORD_MAX];    /* Password (opzionale per restore) */
 };
 

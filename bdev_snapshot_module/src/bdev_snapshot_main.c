@@ -6,6 +6,7 @@
 #include <linux/version.h>
 
 #include "bdev_snapshot.h"
+#include "bdev_auth.h"
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
 #error "This module requires at least the 6.3.0 kernel version."
@@ -30,7 +31,7 @@ static int __init bdevsnapshot_init(void)
 {
 	int ret;
 
-	pr_info("%s: loading module\n", MOD_NAME);
+	pr_info("%s: loading module...\n", MOD_NAME);
 
 	/* --- Auth subsystem --- */
 	ret = bdev_auth_init();
@@ -43,7 +44,7 @@ static int __init bdevsnapshot_init(void)
 	/*ret = bdev_store_global_init();
 	if (ret) {
 		pr_err("%s: bdev_store_global_init failed: %d\n", MOD_NAME, ret);
-		goto err_pw;
+		goto err_auth;
 	}*/
 
 	/* --- Character device --- */
@@ -86,7 +87,7 @@ static int __init bdevsnapshot_init(void)
 		goto err_dev;
 	}
 
-	pr_info("%s: /dev/bdev_snapctl ready (major=%d minor=%d)\n",
+	pr_info("%s: module loaded. /dev/bdev_snapctl ready (major=%d minor=%d)\n",
 		MOD_NAME, MAJOR(dev_num), MINOR(dev_num));
 	return 0;
 
@@ -101,13 +102,15 @@ err_chrdev:
 	unregister_chrdev_region(dev_num, 1);
 err_store:
 	//bdev_store_global_exit();
-//err_pw:
+//err_auth:
 	bdev_auth_exit();
 	return ret;
 }
 
 static void __exit bdevsnapshot_exit(void)
 {
+        pr_info("%s: removing module...\n", MOD_NAME);
+
 	/* Rimuovi kprobe prima di distruggere altre risorse */
 	bdev_kprobe_exit();
 

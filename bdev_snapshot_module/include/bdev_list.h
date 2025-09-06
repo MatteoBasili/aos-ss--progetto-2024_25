@@ -5,7 +5,8 @@
 #include <linux/list.h>
 #include <linux/types.h>
 
-#define SNAP_NAME_MAX 64
+#define DEV_NAME_LEN_MAX  64
+#define SNAP_NAME_MAX     64
 
 /* API pubbliche per snapshot devices */
 int add_snap_device(const char *dev_name);

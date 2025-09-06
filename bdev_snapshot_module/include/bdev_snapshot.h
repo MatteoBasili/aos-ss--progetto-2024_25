@@ -6,7 +6,6 @@
 #include <linux/mutex.h>
 #include <linux/types.h> /* u64 */
 
-#include "bdev_auth.h"
 #include "bdev_ops.h"
 #include "bdev_list.h"
 #include "bdev_store.h"
@@ -15,7 +14,7 @@
 
 /* --- Lista dispositivi snapshot --- */
 struct snap_device {
-	char dev_name[DEV_NAME_LEN];
+	char dev_name[DEV_NAME_LEN_MAX];
 	bool started; /* true alla prima write intercettata */
 	u64 first_write_ns; /* timestamp ns monotonic alla prima write */
 	struct list_head list;

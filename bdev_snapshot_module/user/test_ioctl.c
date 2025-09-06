@@ -20,6 +20,7 @@ static void do_setpw(int fd, const char *pw)
     struct pw_args args;
     memset(&args, 0, sizeof(args));
     strncpy(args.password, pw, SNAP_PASSWORD_MAX - 1);
+    args.password_len = strnlen(pw, SNAP_PASSWORD_MAX - 1);
 
     if (ioctl(fd, SNAP_SETPW, &args) < 0) {
         fprintf(stderr, "SNAP_SETPW failed: %s\n", strerror(errno));
@@ -35,7 +36,7 @@ static void do_snap(int fd, unsigned long code, const char *dev, const char *pw)
 {
     struct snap_args args;
     memset(&args, 0, sizeof(args));
-    strncpy(args.dev_name, dev, DEV_NAME_LEN - 1);
+    strncpy(args.dev_name, dev, DEV_NAME_LEN_MAX - 1);
     if (pw)
         strncpy(args.password, pw, SNAP_PASSWORD_MAX - 1);
 

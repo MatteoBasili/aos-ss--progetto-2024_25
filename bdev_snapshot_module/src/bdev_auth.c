@@ -26,28 +26,28 @@ int check_permission(void)
     return 0;
 }
 
-static bool valid_pw(const char *pw, size_t pwlen)
+static inline bool valid_pw(const char *pw, size_t pwlen)
 {
     return pw && pwlen > 0 && pwlen <= SNAP_PASSWORD_MAX;
-}
-
-static void free_pw_entry_rcu(struct rcu_head *rh)
-{
-    struct pw_entry *pw = container_of(rh, struct pw_entry, rh);
-    memzero_explicit(pw->hash, PW_HASH_LEN);
-    kfree(pw);
 }
 
 /* --- Calcola SHA-256 con alloc temporanea per shash_desc + contesto --- */
 static int compute_sha256(const char *buf, size_t len, u8 *out)
 {
-    int ret;
+    struct shash_desc *sdesc;
+    int size, ret;
 
     if (!sha_tfm)
         return -EINVAL;
 
-    /* SHASH_DESC_ON_STACK: alloca shash_desc + contesto sullo stack */
-    SHASH_DESC_ON_STACK(sdesc, sha_tfm);
+    /* size = sizeof(shash_desc) + spazio richiesto dal transform */
+    size = sizeof(*sdesc) + crypto_shash_descsize(sha_tfm);
+
+    sdesc = kmalloc(size, GFP_KERNEL);
+    if (!sdesc)
+        return -ENOMEM;
+
+    /* Inizializza campi richiesti */
     sdesc->tfm = sha_tfm;
 
     ret = crypto_shash_init(sdesc);
@@ -71,7 +71,7 @@ int set_snap_password(const char *pw, size_t pwlen)
     int ret;
     u8 tmp_hash[PW_HASH_LEN];
     struct pw_entry *new_pw, *old_pw;
-    
+
     if (!valid_pw(pw, pwlen))
         return -EINVAL;
 
@@ -81,7 +81,7 @@ int set_snap_password(const char *pw, size_t pwlen)
         return ret;
     }
 
-    new_pw = kzalloc(sizeof(*new_pw), GFP_KERNEL);
+    new_pw = kmalloc(sizeof(*new_pw), GFP_KERNEL);
     if (!new_pw) {
         memzero_explicit(tmp_hash, PW_HASH_LEN);
         return -ENOMEM;
@@ -93,14 +93,13 @@ int set_snap_password(const char *pw, size_t pwlen)
 
     /* Serializza update con mutex; aggiorna puntatore RCU */
     mutex_lock(&pw_lock);
-    old_pw = rcu_dereference_protected(pw_current,
-                lockdep_is_held(&pw_lock));
+    old_pw = rcu_dereference(pw_current);
     rcu_assign_pointer(pw_current, new_pw);
     mutex_unlock(&pw_lock);
 
     /* libera vecchia entry in modo sicuro (fuori dal lock) */
     if (old_pw)
-        call_rcu(&old_pw->rh, free_pw_entry_rcu);
+        kfree_rcu(old_pw, rh);
 
     return 0;
 }
@@ -125,9 +124,9 @@ bool verify_snap_password(const char *pw, size_t pwlen)
     rcu_read_lock();
     cur = rcu_dereference(pw_current);
     if (cur) {
-        unsigned int diff = 0;
+        u8 diff = 0;
         for (size_t i = 0; i < PW_HASH_LEN; i++) {
-            diff |= (unsigned int)(cur->hash[i] ^ tmp_hash[i]);
+            diff |= cur->hash[i] ^ tmp_hash[i];
         }
         match = (diff == 0);
     }
@@ -143,13 +142,12 @@ static void clear_snap_password(void)
     struct pw_entry *old_pw;
 
     mutex_lock(&pw_lock);
-    old_pw = rcu_dereference_protected(pw_current,
-                lockdep_is_held(&pw_lock));
-    rcu_assign_pointer(pw_current, NULL);
+    old_pw = rcu_dereference(pw_current);
+    RCU_INIT_POINTER(pw_current, NULL);
     mutex_unlock(&pw_lock);
 
     if (old_pw)
-        call_rcu(&old_pw->rh, free_pw_entry_rcu);
+        kfree_rcu(old_pw, rh);
 }
 
 /* --- Initialize crypto transform --- */
@@ -169,8 +167,6 @@ void bdev_auth_exit(void)
 {
     /* clear_snap_password() si occupa di rimuovere e kfree_rcu */
     clear_snap_password();
-    /* aspettare che le callback RCU siano terminate (memoria liberata e hash azzerato) */
-    synchronize_rcu();
 
     if (sha_tfm) {
         crypto_free_shash(sha_tfm);
