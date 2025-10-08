@@ -35,7 +35,7 @@ static void secure_memzero(void *v, size_t n)
 #endif
 }
 
-/* --- Flush stdin after overly long input --- */
+/* --- Flush stdin --- */
 static void flush_stdin(void)
 {
     int c;
@@ -43,7 +43,7 @@ static void flush_stdin(void)
         ;
 }
 
-/* --- Read password without echo and block signals --- */
+/* --- Read password --- */
 static int read_password(char *buf, size_t buflen, const char *prompt)
 {
     if (!buf || buflen == 0)
@@ -223,7 +223,7 @@ static void do_snap(int fd, unsigned long code)
     secure_memzero(args.password, sizeof(args.password));
 }
 
-/* --- Set password --- */
+/* --- Set new password --- */
 static void do_setpw(int fd)
 {
     struct pw_arg pwarg;

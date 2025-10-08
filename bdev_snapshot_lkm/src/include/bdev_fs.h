@@ -1,0 +1,8 @@
+#ifndef _BDEV_FS_H
+#define _BDEV_FS_H
+
+#define SINGLEFILEFS_RESERVED_BLOCKS 2
+#define SINGLEFILEFS_INODE_BLOCK_NUMBER 1
+
+#endif
+

@@ -18,8 +18,10 @@ struct snap_list_ctx {
 struct snap_restore_tmp {
     u64 block_size;
     u64 num_blocks;
-    u64 *saved_blocks;       // array dei blocchi salvati
-    int num_saved_blocks;    // numero di blocchi salvati
+    u64 *saved_blocks;
+    int num_saved_blocks;
+    u32 magic;
+    u16 version;
 };
 
 /**

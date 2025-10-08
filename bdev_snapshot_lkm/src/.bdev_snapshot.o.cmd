@@ -1,1 +1,0 @@
-savedcmd_/home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/bdev_snapshot_lkm/src/bdev_snapshot.o := ld -m elf_x86_64 -z noexecstack   -r -o /home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/bdev_snapshot_lkm/src/bdev_snapshot.o @/home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/bdev_snapshot_lkm/src/bdev_snapshot.mod 

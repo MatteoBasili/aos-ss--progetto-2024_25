@@ -203,7 +203,7 @@ int ensure_dir(const char *path)
     {
         struct path parent;
         struct dentry *dentry;
-        umode_t mode = 0600;
+        umode_t mode = 0700;
 
         dentry = kern_path_create(AT_FDCWD, path, &parent, 0);
         if (IS_ERR(dentry))

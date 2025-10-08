@@ -1,4 +1,3 @@
-#include <linux/file.h> 
 #include <linux/module.h>
 
 #include "bdev_list.h"

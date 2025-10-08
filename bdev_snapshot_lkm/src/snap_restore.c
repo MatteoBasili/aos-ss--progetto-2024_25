@@ -1,29 +1,13 @@
 #include <linux/blkdev.h>
-#include <linux/crc32.h>
 #include <linux/sort.h>
 
 #include "snap_restore.h"
 #include "snap_store.h"
 #include "snap_utils.h"
-#include "uapi/bdev_snapshot.h"
-
-static DEFINE_MUTEX(device_restore_mutex);
 
 /* -------------------------------------------------------------------
- * Directory iteration callbacks
+ * Directory iteration callback
  * ------------------------------------------------------------------- */
-
-/**
- * snap_list_actor_filldir - Callback for iterate_dir() when listing snapshots
- * @ctx:     Directory context
- * @name:    Entry name
- * @namelen: Entry name length
- * @offset:  Directory offset
- * @ino:     Inode number
- * @d_type:  Entry type
- *
- * Filters directory entries and stores valid snapshot timestamps.
- */
 static bool snap_list_actor_filldir(struct dir_context *ctx,
                                     const char *name, int namelen,
                                     loff_t offset, u64 ino,
@@ -57,9 +41,9 @@ static bool snap_list_actor_filldir(struct dir_context *ctx,
     return true;
 }
 
-/**
- * list_snapshots_for_device - List all snapshots for a given device
- */
+/* -------------------------------------------------------------------
+ * List all snapshots for a given device
+ * -------------------------------------------------------------------- */
 int list_snapshots_for_device(const char *dev_name,
                               char timestamps[MAX_SNAPSHOTS][SNAP_TIMESTAMP_MAX],
                               int *count)
@@ -95,20 +79,20 @@ int list_snapshots_for_device(const char *dev_name,
 }
 
 /* -------------------------------------------------------------------
- * Legge metadata.json e popola struct temporanea
- * Controlla se snapshot è aperta e ritorna -EBUSY se open==1
+ * Reads metadata.json and populates temporary restore struct
  * ------------------------------------------------------------------- */
 int snap_load_metadata(struct snap_restore_tmp *dev, const char *snap_dir)
 {
-    struct file *filp;
+    struct file *filp = NULL;
     loff_t pos = 0;
     loff_t size;
     char *buf = NULL;
-    char *p;
     int ret = 0;
 
     if (!dev || !snap_dir)
         return -EINVAL;
+
+    memset(dev, 0, sizeof(*dev));
 
     char *path = kmalloc(PATH_MAX, GFP_KERNEL);
     if (!path)
@@ -123,99 +107,90 @@ int snap_load_metadata(struct snap_restore_tmp *dev, const char *snap_dir)
 
     size = i_size_read(file_inode(filp));
     if (size <= 0) {
-        filp_close(filp, NULL);
-        return -EINVAL;
+        ret = -EINVAL;
+        goto out_close;
     }
 
     buf = kmalloc(size + 1, GFP_KERNEL);
     if (!buf) {
-        filp_close(filp, NULL);
-        return -ENOMEM;
+        ret = -ENOMEM;
+        goto out_close;
     }
 
     if (kernel_read(filp, buf, size, &pos) != size) {
-        kfree(buf);
-        filp_close(filp, NULL);
-        return -EIO;
+        ret = -EIO;
+        goto out_free;
     }
     buf[size] = '\0';
-    filp_close(filp, NULL);
 
-    /* Controlla se snapshot è aperta */
-    p = strnstr(buf, "\"open\":", size);
-    if (!p) {
-        pr_err("%s: cannot find open flag in metadata.json\n", MOD_NAME);
+    if (sscanf(buf, "%*[^0123456789]\"magic\": 0x%X", &dev->magic) != 1 ||
+        sscanf(buf, "%*[^0123456789]\"version\": %hu", &dev->version) != 1 ||
+        sscanf(buf, "%*[^0123456789]\"block_size\": %llu", (unsigned long long *)&dev->block_size) != 1 ||
+        sscanf(buf, "%*[^0123456789]\"num_blocks\": %llu", (unsigned long long *)&dev->num_blocks) != 1) {
+        pr_err("%s: failed to parse metadata fields\n", MOD_NAME);
         ret = -EINVAL;
-        goto out;
+        goto out_free;
     }
+
+    /* Check open flag */
     int open_flag = 0;
-    sscanf(p, "\"open\": %d", &open_flag);
+    if (sscanf(buf, "%*[^0123456789]\"open\": %d", &open_flag) != 1) {
+        pr_err("%s: cannot find open flag\n", MOD_NAME);
+        ret = -EINVAL;
+        goto out_free;
+    }
     if (open_flag == 1) {
-        pr_err("%s: snapshot %s is currently open\n", MOD_NAME, snap_dir);
         ret = -EBUSY;
-        goto out;
+        goto out_free;
     }
 
-    /* Leggi block_size */
-    p = strnstr(buf, "\"block_size\":", size);
-    if (!p) {
-        pr_err("%s: cannot find block_size in metadata.json\n", MOD_NAME);
-        ret = -EINVAL;
-        goto out;
+    char *blocks_start = strnstr(buf, "\"blocks\": [", size);
+    if (!blocks_start) {
+        dev->num_saved_blocks = 0;
+        goto out_free;
     }
-    sscanf(p, "\"block_size\": %llu", (unsigned long long *)&dev->block_size);
+    blocks_start += strlen("\"blocks\": [");
 
-    /* Leggi num_blocks */
-    p = strnstr(buf, "\"num_blocks\":", size);
-    if (!p) {
-        pr_err("%s: cannot find num_blocks in metadata.json\n", MOD_NAME);
-        ret = -EINVAL;
-        goto out;
-    }
-    sscanf(p, "\"num_blocks\": %llu", (unsigned long long *)&dev->num_blocks);
-
-    /* Leggi lista dei blocchi */
-    p = strnstr(buf, "\"blocks\": [", size);
-    if (!p) {
-        pr_err("%s: cannot find blocks array in metadata.json\n", MOD_NAME);
-        ret = -EINVAL;
-        goto out;
-    }
-    p += strlen("\"blocks\": [");
-
-    /* Conta quanti blocchi ci sono */
     dev->num_saved_blocks = 0;
-    for (char *q = p; *q && *q != ']'; q++)
+    for (char *q = blocks_start; *q && *q != ']'; q++)
         if (*q == ',')
             dev->num_saved_blocks++;
-    if (*(p) != ']')
-        dev->num_saved_blocks++; 
+    if (*blocks_start != ']')
+        dev->num_saved_blocks++;
 
     if (dev->num_saved_blocks > 0) {
         dev->saved_blocks = kmalloc_array(dev->num_saved_blocks, sizeof(u64), GFP_KERNEL);
         if (!dev->saved_blocks) {
             ret = -ENOMEM;
-            goto out;
+            goto out_free;
         }
 
-        /* Parse dei blocchi */
         int idx = 0;
         u64 block;
+        char *p = blocks_start;
         while (sscanf(p, " %llu", (unsigned long long *)&block) == 1) {
+            if (idx >= dev->num_saved_blocks)
+                break;
             dev->saved_blocks[idx++] = block;
             p = strchr(p, ',');
             if (!p) break;
-            p++; // salta la virgola
+            p++;
         }
     }
 
-out:
+out_free:
     kfree(buf);
+out_close:
+    filp_close(filp, NULL);
+    if (ret && dev->saved_blocks) {
+        kfree(dev->saved_blocks);
+        dev->saved_blocks = NULL;
+    }
     return ret;
 }
 
 /* -------------------------------------------------------------------
- * Libera la memoria della struct temporanea
+ * Frees the temporary restore struct's memory
  * ------------------------------------------------------------------- */
 void snap_free_metadata(struct snap_restore_tmp *dev)
 {
@@ -227,22 +202,25 @@ void snap_free_metadata(struct snap_restore_tmp *dev)
 }
 
 /* -------------------------------------------------------------------
- * Restore snapshot: scrive i blocchi salvati sul device reale
+ * Restore snapshot: writes the saved blocks to the device file
  * ------------------------------------------------------------------- */
-int restore_snapshot_for_device(const char *dev_name, const char *timestamp)
+static int restore_snapshot_for_device_file(const char *dev_name, const char *timestamp)
 {
     struct snap_restore_tmp dev = {0};
     struct file *dev_file = NULL;
+    char *snap_dir = NULL;
+    char *dev_sanitized = NULL;
     char *block_path = NULL;
+    void *buf = NULL;
     int ret = 0;
     int i;
 
     if (!dev_name || !timestamp)
         return -EINVAL;
 
-    /* Costruisci nome della snapshot */
-    char *snap_dir = kmalloc(PATH_MAX, GFP_KERNEL);
-    char *dev_sanitized = kmalloc(DEV_NAME_LEN_MAX, GFP_KERNEL);
+    /* Path snapshot preparation */
+    snap_dir = kmalloc(PATH_MAX, GFP_KERNEL);
+    dev_sanitized = kmalloc(DEV_NAME_LEN_MAX, GFP_KERNEL);
     if (!snap_dir || !dev_sanitized) {
         ret = -ENOMEM;
         goto out_free_heap;
@@ -251,7 +229,7 @@ int restore_snapshot_for_device(const char *dev_name, const char *timestamp)
     sanitize_devname(dev_name, dev_sanitized, DEV_NAME_LEN_MAX);
     snprintf(snap_dir, PATH_MAX, "%s_%s", dev_sanitized, timestamp);
 
-    /* Carica metadata.json */
+    /* Load metadata */
     ret = snap_load_metadata(&dev, snap_dir);
     if (ret) {
         if (ret == -EBUSY)
@@ -260,82 +238,83 @@ int restore_snapshot_for_device(const char *dev_name, const char *timestamp)
             pr_err("%s: failed to load metadata for %s\n", MOD_NAME, dev_name);
         goto out_free_heap;
     }
+    
+    if (dev.magic != SNAP_MAGIC || dev.version != SNAP_VERSION) {
+        pr_err("%s: incompatible snapshot format (magic/version mismatch)\n", MOD_NAME);
+        ret = -EINVAL;
+        goto out_free_metadata;
+    }
 
-    mutex_lock(&device_restore_mutex);
+    static DEFINE_MUTEX(device_mutex);
+    mutex_lock(&device_mutex);
 
-    /* Apri device reale */
+    /* Open device file */
     dev_file = filp_open(dev_name, O_WRONLY | O_LARGEFILE, 0);
     if (IS_ERR(dev_file)) {
         ret = PTR_ERR(dev_file);
-        goto out_unlock_free_metadata;
+        pr_err("%s: cannot open device %s (err=%d)\n", MOD_NAME, dev_name, ret);
+        goto out_unlock_metadata;
     }
 
     block_path = kmalloc(PATH_MAX, GFP_KERNEL);
-    if (!block_path) {
+    buf = kmalloc(dev.block_size, GFP_KERNEL);
+    if (!block_path || !buf) {
         ret = -ENOMEM;
         goto out_close_dev;
     }
 
-    /* Cicla sui blocchi salvati */
+    /* Loop through all blocks */
     for (i = 0; i < dev.num_saved_blocks; i++) {
         struct file *blk_file = NULL;
-        void *buf = NULL;
         loff_t dev_pos;
         loff_t pos = 0;
         u64 block_num = dev.saved_blocks[i];
-        size_t block_size = dev.block_size;
-        ssize_t read_bytes;
+        
+        snprintf(block_path, PATH_MAX, "%s/%s/block_%08llu",
+                 SNAP_ROOT_DIR, snap_dir, (unsigned long long)block_num);
 
-        /* Alloca buffer */
-        buf = kmalloc(block_size, GFP_KERNEL);
-        if (!buf) {
-            ret = -ENOMEM;
-            goto out_loop;
-        }
-
-        /* Apri file block_XXXXXXXX */
-        snprintf(block_path, PATH_MAX, "%s/%s/block_%08llu", SNAP_ROOT_DIR, snap_dir,
-                 (unsigned long long)block_num);
-                 
         blk_file = filp_open(block_path, O_RDONLY, 0);
         if (IS_ERR(blk_file)) {
-            pr_warn("%s: cannot open block file %s\n", MOD_NAME, block_path);
-            kfree(buf);
-            continue; // salta blocco mancante
+            pr_err("%s: cannot open block file %s\n", MOD_NAME, block_path);
+            ret = PTR_ERR(blk_file);
+            goto out_close_dev;
         }
 
-        /* Leggi blocco */
-        read_bytes = kernel_read(blk_file, buf, block_size, &pos);
-        filp_close(blk_file, NULL);
-        if (read_bytes != block_size) {
-            pr_warn("%s: incomplete read for block %llu\n", MOD_NAME, block_num);
-            kfree(buf);
-            continue;
-        }
-
-        /* Scrivi sul device reale */
-        dev_pos = block_num * block_size;
-        read_bytes = kernel_write(dev_file, buf, block_size, &dev_pos);
-        if (read_bytes != block_size) {
-            pr_err("%s: failed to write block %llu to device\n", MOD_NAME, block_num);
-            kfree(buf);
+        /* Read block */
+        if (kernel_read(blk_file, buf, dev.block_size, &pos) != dev.block_size) {
+            pr_err("%s: failed to read block %llu\n", MOD_NAME, block_num);
+            filp_close(blk_file, NULL);
             ret = -EIO;
-            goto out_loop;
+            goto out_close_dev;
         }
+        filp_close(blk_file, NULL);
 
-        kfree(buf);
+        /* Write on the device */
+        dev_pos = block_num * dev.block_size;
+        if (kernel_write(dev_file, buf, dev.block_size, &dev_pos) != dev.block_size) {
+            pr_err("%s: failed to write block %llu to device\n", MOD_NAME, block_num);
+            ret = -EIO;
+            goto out_close_dev;
+        }
     }
 
-out_loop:
-    kfree(block_path);
 out_close_dev:
     filp_close(dev_file, NULL);
-out_unlock_free_metadata:
-    mutex_unlock(&device_restore_mutex);
+out_unlock_metadata:
+    mutex_unlock(&device_mutex);
+out_free_metadata:
     snap_free_metadata(&dev);
 out_free_heap:
+    kfree(buf);
+    kfree(block_path);
     kfree(snap_dir);
     kfree(dev_sanitized);
+
     return ret;
+}
+
+int restore_snapshot_for_device(const char *dev_name, const char *timestamp)
+{
+    return restore_snapshot_for_device_file(dev_name, timestamp);
 }
 

@@ -77,6 +77,6 @@ module_exit(bdevsnapshot_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Matteo Basili <matteo.basili@students.uniroma2.eu>");
-MODULE_DESCRIPTION("Snapshot service for block devices hosting file systems");
+MODULE_DESCRIPTION("Snapshot service for block devices hosting file systems. In this initial version, only snapshots of the minimal file system (SINGLEFILE-FS) are supported, and restore is available for device files only.");
 MODULE_VERSION("1.0.0");
 

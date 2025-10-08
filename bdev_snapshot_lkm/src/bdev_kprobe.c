@@ -1,9 +1,8 @@
 #include <linux/blkdev.h>
-#include <linux/buffer_head.h>
-#include <linux/fs_context.h>
 #include <linux/kprobes.h>
 #include <linux/major.h>
 
+#include "bdev_fs.h"
 #include "bdev_kprobe.h"
 #include "bdev_list.h"
 #include "snap_store.h"
@@ -79,7 +78,6 @@ out:
 }
 
 /* ================= Workqueue Scheduling ================= */
-
 
 /* Generic function to schedule mount work */
 static void schedule_mount_work(const char *dev_name)
@@ -228,11 +226,26 @@ static int kill_sb_ret_handler(struct kretprobe_instance *ri,
     return 0;
 }
 
-/* ================= FS Write Kprobe ================= */
+/* ================= VFS Write Kretprobe Handlers ================= */
+
+static void populate_singlefilefs_write_metadata(struct singlefilefs_write_kretprobe_metadata *meta,
+                                    struct snap_device *sdev,
+                                    struct inode *inode,
+                                    loff_t *offptr)
+{
+    if (!meta || !sdev || !inode || !offptr)
+        return;
+
+    meta->original_offset = *offptr;
+    meta->inode = inode;
+    meta->original_inode_size = i_size_read(inode);
+    meta->pending_blocks = snap_prepare_singlefilefs_block_save(sdev, inode, offptr);
+}
+
 
 static int vfs_write_entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-    struct write_kretprobe_metadata *meta;
+    struct singlefilefs_write_kretprobe_metadata *meta;
     struct file *filp = (struct file *)PT_REGS_PARM1(regs);
     size_t len = (size_t)PT_REGS_PARM3(regs);
     loff_t *offptr = (loff_t *)PT_REGS_PARM4(regs);
@@ -263,20 +276,17 @@ static int vfs_write_entry_handler(struct kretprobe_instance *ri, struct pt_regs
         return 0;
     }
 
-    meta = (struct write_kretprobe_metadata *)ri->data;
-    meta->original_offset = *offptr;
-    meta->inode = inode;
-    meta->original_inode_size = i_size_read(inode);
-    meta->pending_blocks = snap_prepare_block_save(sdev, inode, offptr);
+    meta = (struct singlefilefs_write_kretprobe_metadata *)ri->data;
+    populate_singlefilefs_write_metadata(meta, sdev, inode, offptr);
 
     snap_device_put(sdev);
     return 0;
 }
 
-/* Ret handler: trasforma i pending_block in work_struct reali */
+/* This is only valid for the singlefilefs */
 static int vfs_write_ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-    struct write_kretprobe_metadata *meta = (struct write_kretprobe_metadata *)ri->data;
+    struct singlefilefs_write_kretprobe_metadata *meta = (struct singlefilefs_write_kretprobe_metadata *)ri->data;
     struct snap_pending_block *blk, *next;
     ssize_t ret = (ssize_t)regs_return_value(regs);
     loff_t final_offset;
@@ -286,7 +296,7 @@ static int vfs_write_ret_handler(struct kretprobe_instance *ri, struct pt_regs *
 
     blk = meta->pending_blocks;
 
-    /* Se scrittura fallita → libera memoria dei pending_block */
+    /* If writing fails → free pending_block memory */
     if (ret <= 0) {
         while (blk) {
             next = blk->next;
@@ -300,19 +310,19 @@ static int vfs_write_ret_handler(struct kretprobe_instance *ri, struct pt_regs *
 
     final_offset = meta->original_offset + ret;
 
-    /* Scrittura OK → per ogni pending_block crea un work_struct */
+    /* Writing OK → for each pending_block create a work_struct */
     while (blk) {
         next = blk->next;
 
-        /* Blocco inode: schedula solo se la scrittura ha esteso il file */
-        if (blk->block_num == 1 && final_offset <= meta->original_inode_size) {
+        /* Inode lock: schedule only if writing has extended the file */
+        if (blk->block_num == SINGLEFILEFS_INODE_BLOCK_NUMBER && final_offset <= meta->original_inode_size) {
             kfree(blk->data);
             kfree(blk);
             blk = next;
             continue;
         }
 
-        /* Controlla se il blocco è già stato salvato */
+        /* Check if the block has already been saved */
         if (!snap_try_mark_block_saved(blk->dev, blk->block_num)) {
             struct snap_block_work *bw = kmalloc(sizeof(*bw), GFP_ATOMIC);
             if (bw) {
@@ -326,13 +336,13 @@ static int vfs_write_ret_handler(struct kretprobe_instance *ri, struct pt_regs *
                 INIT_WORK(&bw->work, snap_block_work_handler);
                 queue_work(bw->dev->wq, &bw->work);
             } else {
-                kfree(blk->data); // libera la memoria se fallisce kmalloc
+                kfree(blk->data);
             }
         } else {
-            kfree(blk->data); // blocco già salvato, libera memoria
+            kfree(blk->data);
         }
 
-        kfree(blk);  /* libera solo il contenitore temporaneo */
+        kfree(blk);
         blk = next;
     }
 
@@ -397,7 +407,7 @@ static int vfs_write_kretprobe_init(void)
     rp_write_fs.entry_handler = vfs_write_entry_handler;
     rp_write_fs.handler = vfs_write_ret_handler;
     rp_write_fs.maxactive = 40;
-    rp_write_fs.data_size = sizeof(struct write_kretprobe_metadata);
+    rp_write_fs.data_size = sizeof(struct singlefilefs_write_kretprobe_metadata);
 
     ret = register_kretprobe(&rp_write_fs);
     if (ret)

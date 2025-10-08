@@ -1,4 +1,3 @@
-#include <linux/fs.h>
 #include <linux/module.h>
 
 #include "bdev_list.h"
@@ -137,7 +136,7 @@ int restore_snapshot(const char *dev_name, const char *password, const char *tim
         return -EACCES;
     }
 
-    /* Esegue il restore vero e proprio */
+    /* Performs the actual restore */
     ret = restore_snapshot_for_device(dev_name, timestamp);
     if (ret == 0) {
         pr_info("%s: restore completed for device %s snapshot %s\n",

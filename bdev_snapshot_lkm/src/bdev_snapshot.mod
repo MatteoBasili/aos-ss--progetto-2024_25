@@ -1,9 +1,0 @@
-/home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/bdev_snapshot_lkm/src/bdev_snapshot_main.o
-/home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/bdev_snapshot_lkm/src/snap_auth.o
-/home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/bdev_snapshot_lkm/src/cdev_snap.o
-/home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/bdev_snapshot_lkm/src/bdev_kprobe.o
-/home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/bdev_snapshot_lkm/src/snap_ioctl.o
-/home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/bdev_snapshot_lkm/src/bdev_list.o
-/home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/bdev_snapshot_lkm/src/snap_store.o
-/home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/bdev_snapshot_lkm/src/snap_restore.o
-/home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/bdev_snapshot_lkm/src/snap_utils.o

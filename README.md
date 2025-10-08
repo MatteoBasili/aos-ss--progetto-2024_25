@@ -14,7 +14,7 @@ The objective of this project is to design and implement a Linux Kernel Module (
 
 ### 📄 Specification
 
-[block-device snapshot](https://francescoquaglia.github.io/TEACHING/AOS/CURRENT/PROJECTS/project-specification-2024-2025.html)
+[block-device snapshot](https://francescoquaglia.github.io/TEACHING/AOS/AA-2024-2025/PROJECTS/project-specification-2024-2025.html)
 
 ---
 
@@ -22,8 +22,8 @@ The objective of this project is to design and implement a Linux Kernel Module (
 
 The implemented solution provides a complete snapshot service for **block devices**, with a focus on **efficiency, security, and testability**.
 
-> ⚠️ **Note:** In this first version, the project provides **full snapshot support only for block devices mounting the minimal file system provided** (at [this link](https://francescoquaglia.github.io/TEACHING/AOS/CURRENT/PROJECTS/SINGLEFILE-FS.tar)) by the course instructor. **Other file systems are not yet supported**.  
-> The **restore functionality** has been implemented and tested **exclusively for device files**. Restoring mounted file systems on **real devices is not currently supported**.
+> ⚠️ **Note:** In this first version, the project provides **full snapshot support only for block devices mounting the minimal file system provided** (at [this link](https://francescoquaglia.github.io/TEACHING/AOS/AA-2024-2025/PROJECTS/SINGLEFILE-FS.tar)) by the course instructor. **Other file systems are not yet supported**.  
+> The **restore functionality** has been implemented and tested **exclusively for device files**. Snapshot support **is not guaranteed for real block devices**, and restoring mounted file systems on such devices **is currently unsupported**.
 
 Key aspects of the implementation include:
 

@@ -17,8 +17,6 @@ clean:
 	$(MAKE) -C $(SRC_DIR) clean
 	@echo ">>> Cleaning user-space program..."
 	$(MAKE) -C $(USER_DIR) clean
-	@rm -f Module.symvers modules.order .Module.symvers.cmd .modules.order.cmd
-	@rm -rf .tmp_versions
 
 # Load the module without the password
 load:

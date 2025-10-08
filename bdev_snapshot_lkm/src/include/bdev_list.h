@@ -34,9 +34,6 @@ int snapdev_do_mount_work(struct snap_device *dev);
 int snapdev_mark_unmounted(struct snap_device *dev);
 int snapdev_do_unmount_work(struct snap_device *dev);
 
-struct file *snapdev_get_backing_file(struct snap_device *dev);
-struct file *snapdev_get_snapshot_file(struct snap_device *dev);
-void snapdev_put_file(struct file *filp);
 unsigned long *snapdev_get_saved_bitmap(struct snap_device *dev);
 bool snapdev_is_mounted(struct snap_device *dev);
 

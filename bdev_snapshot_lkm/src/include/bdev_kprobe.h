@@ -35,7 +35,7 @@ struct umount_kretprobe_metadata {
     char dev_name[DEV_NAME_LEN_MAX];
 };
 
-struct write_kretprobe_metadata {
+struct singlefilefs_write_kretprobe_metadata {
     struct snap_pending_block *pending_blocks;
     loff_t original_offset;
     loff_t original_inode_size; 

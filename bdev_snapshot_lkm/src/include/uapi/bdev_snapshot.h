@@ -10,7 +10,7 @@
 /* -------------------------------------------------------------------
  * Limits and constants
  * ------------------------------------------------------------------- */
-#define DEV_NAME_LEN_MAX   257   /* Maximum device name length */
+#define DEV_NAME_LEN_MAX   513   /* Maximum device name length */
 #define SNAP_PASSWORD_MAX  65   /* Maximum password length */
 #define SNAP_ROOT_DIR      "/snapshot" /* Root directory for stored snapshots */
 

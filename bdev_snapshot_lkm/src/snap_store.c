@@ -1,7 +1,6 @@
-#include <linux/blkdev.h>
 #include <linux/buffer_head.h>
-#include <linux/crc32.h>
 
+#include "bdev_fs.h"
 #include "snap_store.h"
 #include "snap_utils.h"
 #include "uapi/bdev_snapshot.h"
@@ -25,23 +24,28 @@ static int snap_save_block_to_file(struct snap_device *dev, u64 block_num, void 
 
     filp = filp_open(path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
     kfree(path);
-    if (IS_ERR(filp))
-        return PTR_ERR(filp);
+    if (IS_ERR(filp)) {       
+        ret = PTR_ERR(filp);
+        kfree(path);
+        return ret;
+    }
 
     ret = kernel_write(filp, data, len, &pos);
     if (ret < 0)
         pr_warn("%s: failed to write block %llu\n", MOD_NAME, (unsigned long long)block_num);
 
     filp_close(filp, NULL);
+    kfree(path);
+    
     return ret;
 }
 
 /* -------------------------------------------------------------------
- * Aggiorna metadata.json aggiungendo un nuovo blocco
+ * Update metadata.json by adding a new block
  * ------------------------------------------------------------------- */
 static int snap_update_metadata_block(struct snap_device *dev, u64 block_num)
 {
-    char *path, *buf, *new_buf;
+    char *path = NULL, *buf = NULL, *new_buf = NULL;
     struct file *filp;
     struct inode *inode;
     loff_t size;
@@ -60,11 +64,13 @@ static int snap_update_metadata_block(struct snap_device *dev, u64 block_num)
     scnprintf(path, PATH_MAX, "%s/%s/metadata.json",
               SNAP_ROOT_DIR, dev->snapshot_dir);
 
+    mutex_lock(&dev->lock);
+
     filp = filp_open(path, O_RDWR, 0);
     kfree(path);
     if (IS_ERR(filp)) {
         ret = PTR_ERR(filp);
-        goto out;
+        goto out_unlock;
     }
 
     inode = file_inode(filp);
@@ -80,45 +86,36 @@ static int snap_update_metadata_block(struct snap_device *dev, u64 block_num)
         goto out_close;
     }
 
-    /* leggi tutto il file */
     ret = kernel_read(filp, buf, size, &pos);
     if (ret < 0) {
-        kfree(buf);
-        goto out_close;
+        pr_err("%s: failed to read metadata.json, err=%d\n", MOD_NAME, ret);
+        goto out_free;
     }
     buf[size] = '\0';
 
-    /* trova "blocks": [ */
     p = strnstr(buf, "\"blocks\": [", size);
     if (!p) {
-        pr_err("%s: metadata.json formato inatteso (manca blocks)\n", MOD_NAME);
+        pr_err("%s: metadata.json unexpected format (missing blocks)\n", MOD_NAME);
         ret = -EINVAL;
-        kfree(buf);
-        goto out_close;
+        goto out_free;
     }
 
-    /* trova la ']' corrispondente */
     end = strchr(p, ']');
     if (!end) {
-        pr_err("%s: metadata.json formato inatteso (manca ])\n", MOD_NAME);
+        pr_err("%s: metadata.json unexpected format (missing ])\n", MOD_NAME);
         ret = -EINVAL;
-        kfree(buf);
-        goto out_close;
+        goto out_free;
     }
 
-    /* costruiamo nuova stringa con il blocco */
-    new_buf = kmalloc(size + 32, GFP_KERNEL); /* spazio extra per numero */
+    new_buf = kmalloc(size + 32, GFP_KERNEL);
     if (!new_buf) {
         ret = -ENOMEM;
-        kfree(buf);
-        goto out_close;
+        goto out_free;
     }
 
-    /* copia parte fino a prima di ']' */
     new_len = end - buf;
     memcpy(new_buf, buf, new_len);
 
-    /* decidiamo se è il primo elemento o no */
     if (*(end - 1) == '[') {
         new_len += scnprintf(new_buf + new_len,
                              32, "%llu", (unsigned long long)block_num);
@@ -127,26 +124,26 @@ static int snap_update_metadata_block(struct snap_device *dev, u64 block_num)
                              32, ", %llu", (unsigned long long)block_num);
     }
 
-    /* copia il resto compreso da ']' in poi */
     strcpy(new_buf + new_len, end);
 
-    /* riscrivi tutto il file */
     pos = 0;
     ret = kernel_write(filp, new_buf, strlen(new_buf), &pos);
+    if (ret < 0)
+        pr_err("%s: failed to write metadata.json, err=%d\n", MOD_NAME, ret);
 
-    kfree(buf);
     kfree(new_buf);
-
+out_free:
+    kfree(buf);
 out_close:
     filp_close(filp, NULL);
-out:
+out_unlock:
+    mutex_unlock(&dev->lock);
     return ret;
 }
 
-
 static int mark_snapshot_closed(struct snap_device *dev)
 {
-    char *path, *buf;
+    char *path = NULL, *buf = NULL;
     struct file *filp;
     struct inode *inode;
     loff_t size;
@@ -177,31 +174,32 @@ static int mark_snapshot_closed(struct snap_device *dev)
         return -ENOMEM;
     }
 
-    /* leggi tutto il file in memoria */
     ret = kernel_read(filp, buf, size, &pos);
     if (ret < 0) {
+        pr_err("%s: failed to read metadata.json, err=%d\n", MOD_NAME, ret);
         kfree(buf);
         filp_close(filp, NULL);
         return ret;
     }
     buf[size] = '\0';
 
-    /* cerca la stringa "open": 1 */
     {
         char *p = strnstr(buf, "\"open\": 1", size);
         if (p) {
-            p[8] = '0';  // sostituisci il carattere '1' con '0'
+            p[8] = '0';
         } else {
-            pr_warn("%s: campo 'open' non trovato in metadata.json\n", MOD_NAME);
+            pr_warn("%s: 'open' field not found in metadata.json\n", MOD_NAME);
         }
     }
 
-    /* riscrivi l’intero file aggiornato */
     pos = 0;
     ret = kernel_write(filp, buf, size, &pos);
+    if (ret < 0)
+        pr_err("%s: failed to update 'open' in metadata.json, err=%d\n", MOD_NAME, ret);
 
     kfree(buf);
     filp_close(filp, NULL);
+
     return ret;
 }
 
@@ -237,11 +235,19 @@ void snap_block_work_handler(struct work_struct *work)
 
     dev = bw->dev;
 
-    // Save block to separate file
-    snap_save_block_to_file(dev, bw->block_num, bw->data, bw->len);
-
-    // Update metadata.json
-    snap_update_metadata_block(dev, bw->block_num);
+    if (snap_save_block_to_file(dev, bw->block_num, bw->data, bw->len) < 0) {
+        pr_err("%s: failed to save block %llu\n", MOD_NAME, (unsigned long long)bw->block_num);
+        
+        /* Removes the flag in the bitmap on error */
+        unsigned long *bitmap = snapdev_get_saved_bitmap(dev);
+        if (bitmap)
+            clear_bit(bw->block_num, bitmap);
+    } else {
+        if (snap_update_metadata_block(dev, bw->block_num) < 0) {
+            pr_err("%s: failed to update metadata for block %llu\n",
+                   MOD_NAME, (unsigned long long)bw->block_num);
+        }
+    }
 
 out_free:
     if (bw->data)
@@ -250,69 +256,77 @@ out_free:
     kfree(bw);
 }
 
-/* Restituisce lista di snap_block_work pronta da schedulare, NULL se nulla */
-struct snap_pending_block *snap_prepare_block_save(struct snap_device *dev, struct inode *inode, loff_t *off)
+static struct snap_pending_block *snap_alloc_block_from_bh(struct snap_device *dev,
+                                                           struct buffer_head *bh,
+                                                           int block_nr,
+                                                           size_t block_size)
+{
+    struct snap_pending_block *blk = NULL;
+
+    if (!bh || !dev)
+        return NULL;
+
+    blk = kmalloc(sizeof(*blk), GFP_ATOMIC);
+    if (!blk)
+        return NULL;
+
+    blk->data = kmemdup(bh->b_data, block_size, GFP_ATOMIC);
+    if (!blk->data) {
+        kfree(blk);
+        return NULL;
+    }
+
+    blk->dev = dev;
+    blk->block_num = block_nr;
+    blk->len = block_size;
+    blk->next = NULL;
+
+    return blk;
+}
+
+
+/* Returns list of snap_block_work ready to schedule, NULL if nothing */
+struct snap_pending_block *snap_prepare_singlefilefs_block_save(struct snap_device *dev,
+                                                                struct inode *inode,
+                                                                loff_t *off)
 {
     size_t block_size;
     struct buffer_head *bh;
     int block_nr;
     struct snap_pending_block *blk, *first = NULL, *last = NULL;
 
-    if (!dev || !inode || !inode->i_sb || !off) {
+    if (!dev || !inode || !inode->i_sb || !off)
         return NULL;
-    }
 
     block_size = snap_get_filesystem_block_size_from_inode(inode);
-    if (block_size == 0) {
+    if (block_size == 0)
         return NULL;
-    }    
-        
-    block_nr = *off / block_size + 2;
-    
+
+    /* Data block */
+    block_nr = *off / block_size + SINGLEFILEFS_RESERVED_BLOCKS;
     bh = sb_bread(inode->i_sb, block_nr);
     if (bh) {
-        blk = kmalloc(sizeof(*blk), GFP_ATOMIC);
+        blk = snap_alloc_block_from_bh(dev, bh, block_nr, block_size);
         if (blk) {
-            blk->data = kmemdup(bh->b_data, block_size, GFP_ATOMIC);
-            if (blk->data) {
-                blk->dev = dev;
-                blk->block_num = block_nr;
-                blk->len = block_size;
-                blk->next = NULL;
-
-                if (!first) first = blk;
-                if (last) last->next = blk;
-                last = blk;                                
-            } else {                
-                kfree(blk);
-            }
+            first = blk;
+            last = blk;
         }
         brelse(bh);
-    }   
-    
-    block_nr = 1; // of the inode    
-    
+    }
+
+    /* Inode block */
+    block_nr = SINGLEFILEFS_INODE_BLOCK_NUMBER;
     bh = sb_bread(inode->i_sb, block_nr);
     if (bh) {
-        blk = kmalloc(sizeof(*blk), GFP_ATOMIC);
+        blk = snap_alloc_block_from_bh(dev, bh, block_nr, block_size);
         if (blk) {
-            blk->data = kmemdup(bh->b_data, block_size, GFP_ATOMIC);
-            if (blk->data) {
-                blk->dev       = dev;
-                blk->block_num = block_nr;
-                blk->len       = block_size;
-                blk->next = NULL;
-
-                if (!first) first = blk;
-                if (last) last->next = blk;
-                last = blk;                                
-            } else {                
-                kfree(blk);
-            }
+            if (!first) first = blk;
+            if (last) last->next = blk;
+            last = blk;
         }
         brelse(bh);
-    }           
-    
+    }
+
     return first;
 }
 
@@ -353,7 +367,7 @@ static int create_snapshot_dir(const char *dir_name)
  * ------------------------------------------------------------------- */
 static int initialize_snapshot(struct snap_device *dev, const char *dir_name)
 {
-    char *path, *json_buf;
+    char *path = NULL, *json_buf = NULL;
     struct file *filp;
     loff_t pos = 0;
     int ret;
@@ -362,10 +376,6 @@ static int initialize_snapshot(struct snap_device *dev, const char *dir_name)
         return -EINVAL;
 
     path = kmalloc(PATH_MAX, GFP_KERNEL);
-    if (!path)
-        return -ENOMEM;
-
-    path     = kmalloc(PATH_MAX, GFP_KERNEL);
     json_buf = kmalloc(1024, GFP_KERNEL);
     if (!path || !json_buf) {
         kfree(path);
@@ -376,10 +386,9 @@ static int initialize_snapshot(struct snap_device *dev, const char *dir_name)
     scnprintf(path, PATH_MAX, "%s/%s/metadata.json", SNAP_ROOT_DIR, dir_name);
 
     filp = filp_open(path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
-    kfree(path);
-
     if (IS_ERR(filp)) {
         pr_err("%s: cannot create metadata.json for %s\n", MOD_NAME, dev->dev_name);
+        kfree(path);
         kfree(json_buf);
         return PTR_ERR(filp);
     }
@@ -387,6 +396,8 @@ static int initialize_snapshot(struct snap_device *dev, const char *dir_name)
     /* Write initial JSON */
     ret = scnprintf(json_buf, 1024,
         "{\n"
+        "  \"magic\": 0x%X,\n"
+        "  \"version\": %d,\n"
         "  \"device_name\": \"%s\",\n"
         "  \"snapshot_id\": \"%s\",\n"
         "  \"timestamp\": \"%llu\",\n"
@@ -396,6 +407,8 @@ static int initialize_snapshot(struct snap_device *dev, const char *dir_name)
         "  \"open\": 1,\n"
         "  \"blocks\": []\n"
         "}\n",
+        SNAP_MAGIC,
+        SNAP_VERSION,
         dev->dev_name,
         dir_name,
         (unsigned long long)dev->mount_time.tv_sec,
@@ -404,12 +417,17 @@ static int initialize_snapshot(struct snap_device *dev, const char *dir_name)
         (unsigned long long)dev->num_blocks
     );
 
-    kernel_write(filp, json_buf, ret, &pos);
+    ret = kernel_write(filp, json_buf, ret, &pos);
+    if (ret < 0)
+        pr_err("%s: failed to write metadata.json for %s, err=%d\n",
+               MOD_NAME, dev->dev_name, ret);
+    
     filp_close(filp, NULL);
+    kfree(path);
     kfree(json_buf);
 
     pr_info("%s: metadata.json initialized for %s\n", MOD_NAME, dev->dev_name);
-    return 0;
+    return ret;
 }
 
 /* -------------------------------------------------------------------
