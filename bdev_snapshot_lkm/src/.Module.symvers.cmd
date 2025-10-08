@@ -1,0 +1,1 @@
+savedcmd_/home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/bdev_snapshot_lkm/src/Module.symvers :=  scripts/mod/modpost -M -m -a      -o /home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/bdev_snapshot_lkm/src/Module.symvers -T /home/matteo/Scrivania/SOASS/Repository/aos-ss--progetto-2024_25/bdev_snapshot_lkm/src/modules.order -i Module.symvers -e 
