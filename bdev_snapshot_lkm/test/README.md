@@ -63,7 +63,7 @@ sudo dmesg | tail
 ## ✏️ 6. Modify the file inside the file system
 
 Use the provided user-space program (from the file system module) to modify the file within the mounted minimal file system.
-For example, run:
+For example, run (from the `SINGLEFILE-FS` directory):
 
 ```bash
 ./user/user ./mount/the-file "This file has been modified!" 0
