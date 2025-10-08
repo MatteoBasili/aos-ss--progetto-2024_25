@@ -161,5 +161,5 @@ make clean
 
 ## 🧪 Testing
 
-To test that the module is working correctly, follow this [guide]().
+To test that the module is working correctly, follow this [guide](https://github.com/MatteoBasili/aos-ss--progetto-2024_25/blob/main/bdev_snapshot_lkm/test/README.md).
 

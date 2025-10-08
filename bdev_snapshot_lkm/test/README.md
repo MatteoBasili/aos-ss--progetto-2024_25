@@ -23,7 +23,7 @@ This will:
 
 ## 🧩 2. Load the snapshot module
 
-Follow the [main guide]() to load the **snapshot module** (for simplicity, already with a password embedded) and start the **user-space control tool**.
+Follow the [main guide](https://github.com/MatteoBasili/aos-ss--progetto-2024_25/blob/main/README.md) to load the **snapshot module** (for simplicity, already with a password embedded) and start the **user-space control tool**.
 
 Once the user-space program (`bdev_snap_app`) is running, you can interact with the kernel module via `ioctl()` commands.
 
