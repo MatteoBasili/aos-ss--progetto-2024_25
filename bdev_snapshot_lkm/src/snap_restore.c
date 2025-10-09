@@ -123,19 +123,40 @@ int snap_load_metadata(struct snap_restore_tmp *dev, const char *snap_dir)
     }
     buf[size] = '\0';
 
-    if (sscanf(buf, "%*[^0123456789]\"magic\": 0x%X", &dev->magic) != 1 ||
-        sscanf(buf, "%*[^0123456789]\"version\": %hu", &dev->version) != 1 ||
-        sscanf(buf, "%*[^0123456789]\"block_size\": %llu", (unsigned long long *)&dev->block_size) != 1 ||
-        sscanf(buf, "%*[^0123456789]\"num_blocks\": %llu", (unsigned long long *)&dev->num_blocks) != 1) {
-        pr_err("%s: failed to parse metadata fields\n", MOD_NAME);
+    /* Parsing fields */
+    char *p;
+
+    p = strnstr(buf, "\"magic\":", size);
+    if (!p || sscanf(p, "\"magic\": 0x%X", &dev->magic) != 1) {
         ret = -EINVAL;
         goto out_free;
     }
 
-    /* Check open flag */
+    p = strnstr(buf, "\"version\":", size);
+    if (!p || sscanf(p, "\"version\": %hu", &dev->version) != 1) {
+        ret = -EINVAL;
+        goto out_free;
+    }
+
+    p = strnstr(buf, "\"block_size\":", size);
+    if (!p || sscanf(p, "\"block_size\": %llu", (unsigned long long *)&dev->block_size) != 1) {
+        ret = -EINVAL;
+        goto out_free;
+    }
+
+    p = strnstr(buf, "\"num_blocks\":", size);
+    if (!p || sscanf(p, "\"num_blocks\": %llu", (unsigned long long *)&dev->num_blocks) != 1) {
+        ret = -EINVAL;
+        goto out_free;
+    }
+
+    p = strnstr(buf, "\"open\":", size);
+    if (!p) {
+        ret = -EINVAL;
+        goto out_free;
+    }
     int open_flag = 0;
-    if (sscanf(buf, "%*[^0123456789]\"open\": %d", &open_flag) != 1) {
-        pr_err("%s: cannot find open flag\n", MOD_NAME);
+    if (sscanf(p, "\"open\": %d", &open_flag) != 1) {
         ret = -EINVAL;
         goto out_free;
     }
@@ -144,18 +165,20 @@ int snap_load_metadata(struct snap_restore_tmp *dev, const char *snap_dir)
         goto out_free;
     }
 
-    char *blocks_start = strnstr(buf, "\"blocks\": [", size);
-    if (!blocks_start) {
+    /* Parse blocks array */
+    p = strnstr(buf, "\"blocks\": [", size);
+    if (!p) {
         dev->num_saved_blocks = 0;
         goto out_free;
     }
-    blocks_start += strlen("\"blocks\": [");
+    p += strlen("\"blocks\": [");
 
+    /* Count the blocks */
     dev->num_saved_blocks = 0;
-    for (char *q = blocks_start; *q && *q != ']'; q++)
+    for (char *q = p; q && *q != ']'; q++)
         if (*q == ',')
             dev->num_saved_blocks++;
-    if (*blocks_start != ']')
+    if (*p != ']')
         dev->num_saved_blocks++;
 
     if (dev->num_saved_blocks > 0) {
@@ -167,16 +190,18 @@ int snap_load_metadata(struct snap_restore_tmp *dev, const char *snap_dir)
 
         int idx = 0;
         u64 block;
-        char *p = blocks_start;
-        while (sscanf(p, " %llu", (unsigned long long *)&block) == 1) {
-            if (idx >= dev->num_saved_blocks)
-                break;
-            dev->saved_blocks[idx++] = block;
-            p = strchr(p, ',');
-            if (!p) break;
-            p++;
+        char *blk_p = p;
+        while (blk_p && *blk_p != ']' && idx < dev->num_saved_blocks) {
+            if (sscanf(blk_p, " %llu", (unsigned long long *)&block) == 1) {
+                dev->saved_blocks[idx++] = block;
+            }
+            blk_p = strchr(blk_p, ',');
+            if (blk_p) blk_p++;
+            else break;
         }
     }
+
+    ret = 0;
 
 out_free:
     kfree(buf);

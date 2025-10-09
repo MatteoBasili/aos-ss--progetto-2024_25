@@ -23,11 +23,9 @@ static int snap_save_block_to_file(struct snap_device *dev, u64 block_num, void 
               SNAP_ROOT_DIR, dev->snapshot_dir, (unsigned long long)block_num);
 
     filp = filp_open(path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
-    kfree(path);
     if (IS_ERR(filp)) {       
         ret = PTR_ERR(filp);
-        kfree(path);
-        return ret;
+        goto out_free;
     }
 
     ret = kernel_write(filp, data, len, &pos);
@@ -35,8 +33,9 @@ static int snap_save_block_to_file(struct snap_device *dev, u64 block_num, void 
         pr_warn("%s: failed to write block %llu\n", MOD_NAME, (unsigned long long)block_num);
 
     filp_close(filp, NULL);
-    kfree(path);
     
+out_free:    
+    kfree(path);    
     return ret;
 }
 
@@ -184,9 +183,15 @@ static int mark_snapshot_closed(struct snap_device *dev)
     buf[size] = '\0';
 
     {
-        char *p = strnstr(buf, "\"open\": 1", size);
+        char *p = strnstr(buf, "\"open\":", size);
         if (p) {
-            p[8] = '0';
+            /* Salti gli spazi dopo i due punti */
+            char *val = p + 7;
+            while (*val == ' ' || *val == '\t')
+                val++;
+
+            if (*val == '1')
+                *val = '0';
         } else {
             pr_warn("%s: 'open' field not found in metadata.json\n", MOD_NAME);
         }
@@ -370,6 +375,7 @@ static int initialize_snapshot(struct snap_device *dev, const char *dir_name)
     char *path = NULL, *json_buf = NULL;
     struct file *filp;
     loff_t pos = 0;
+    ssize_t written;
     int ret;
 
     if (!dev || !dir_name)
@@ -388,16 +394,15 @@ static int initialize_snapshot(struct snap_device *dev, const char *dir_name)
     filp = filp_open(path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
     if (IS_ERR(filp)) {
         pr_err("%s: cannot create metadata.json for %s\n", MOD_NAME, dev->dev_name);
-        kfree(path);
-        kfree(json_buf);
-        return PTR_ERR(filp);
+        ret = PTR_ERR(filp);
+        goto out;
     }
 
     /* Write initial JSON */
-    ret = scnprintf(json_buf, 1024,
+    written = scnprintf(json_buf, 1024,
         "{\n"
         "  \"magic\": 0x%X,\n"
-        "  \"version\": %d,\n"
+        "  \"version\": %u,\n"
         "  \"device_name\": \"%s\",\n"
         "  \"snapshot_id\": \"%s\",\n"
         "  \"timestamp\": \"%llu\",\n"
@@ -417,16 +422,24 @@ static int initialize_snapshot(struct snap_device *dev, const char *dir_name)
         (unsigned long long)dev->num_blocks
     );
 
-    ret = kernel_write(filp, json_buf, ret, &pos);
-    if (ret < 0)
-        pr_err("%s: failed to write metadata.json for %s, err=%d\n",
-               MOD_NAME, dev->dev_name, ret);
+    written = kernel_write(filp, json_buf, written, &pos);
+    if (written < 0) {
+        pr_err("%s: failed to write metadata.json for %s, err=%zd\n",
+               MOD_NAME, dev->dev_name, written);
+        ret = (int)written;
+        goto close_file;
+    }
     
+    pr_info("%s: metadata.json initialized for %s\n", MOD_NAME, dev->dev_name);
+
+close_file:    
     filp_close(filp, NULL);
+    
+out:    
     kfree(path);
     kfree(json_buf);
 
-    pr_info("%s: metadata.json initialized for %s\n", MOD_NAME, dev->dev_name);
+        
     return ret;
 }
 

@@ -9,6 +9,9 @@
 static LIST_HEAD(snap_dev_list);
 static DEFINE_MUTEX(snap_dev_mutex);
 
+/* Global workqueue for cleanup of individual wqs */
+static struct workqueue_struct *cleanup_wq;
+
 /* ============================================================
  * Internal helpers
  * ============================================================ */
@@ -34,20 +37,40 @@ static struct snap_device *_find_snap_device_rcu(const char *dev_name)
     return NULL;
 }
 
-static void cleanup_device_wq_if_needed(struct snap_device *dev)
+/* Workqueue cleanup work handler */
+static void wq_cleanup_work_handler(struct work_struct *work)
 {
-    if (!dev)
-        return;
+    struct wq_cleanup_work *cw = container_of(work, struct wq_cleanup_work, work);
+    struct snap_device *dev = cw->dev;
 
-    if (!dev->enabled && !dev->mounted && dev->wq) {
+    snap_device_get(dev);
+
+    if (dev->wq) {
         flush_workqueue(dev->wq);
         destroy_workqueue(dev->wq);
         dev->wq = NULL;
     }
+
+    snap_device_put(dev);
+    kfree(cw);
+}
+
+/* Schedule workqueue cleanup on cleanup_wq */
+static void schedule_cleanup_device_wq(struct snap_device *dev)
+{
+    struct wq_cleanup_work *cw = kmalloc(sizeof(*cw), GFP_KERNEL);
+    if (!cw)
+        return;
+
+    cw->dev = dev;
+    snap_device_get(dev);
+
+    INIT_WORK(&cw->work, wq_cleanup_work_handler);
+    queue_work(cleanup_wq, &cw->work);
 }
 
 /* Internal: remove device (snap_dev_mutex must already be held) */
-static void __remove_device_if_disabled(struct snap_device *dev)
+static void __remove_device_if_disabled(struct snap_device *dev, bool defer_cleanup)
 {
     bool drop = false;
 
@@ -59,15 +82,25 @@ static void __remove_device_if_disabled(struct snap_device *dev)
     if (drop) {
         list_del_rcu(&dev->list);
         synchronize_rcu();
+        
+        if (defer_cleanup) {
+            schedule_cleanup_device_wq(dev);
+        } else {
+            if (dev->wq) {
+                flush_workqueue(dev->wq);
+                destroy_workqueue(dev->wq);
+                dev->wq = NULL;
+            }            
+        }
         snap_device_put(dev);
     }
 }
 
 /* Public safe wrapper: acquires snap_dev_mutex */
-static void remove_device_if_disabled(struct snap_device *dev)
+static void remove_device_if_disabled_after_unmount(struct snap_device *dev)
 {
     mutex_lock(&snap_dev_mutex);
-    __remove_device_if_disabled(dev);
+    __remove_device_if_disabled(dev, true);
     mutex_unlock(&snap_dev_mutex);
 }
 
@@ -182,7 +215,7 @@ int disable_snap_device(const char *dev_name)
                 dev->enabled = false;
                 mutex_unlock(&dev->lock);
                 
-                __remove_device_if_disabled(dev);
+                __remove_device_if_disabled(dev, false);
                 ret = 0;
                 goto out_unlock;
             }
@@ -304,7 +337,6 @@ static int __snapdev_do_unmount_work(struct snap_device *dev)
         goto out_unlock;
     }
 
-    cleanup_device_wq_if_needed(dev);
     close_snapshot(dev);
 
     kfree(dev->saved_bitmap);
@@ -321,7 +353,7 @@ int snapdev_do_unmount_work(struct snap_device *dev)
     int ret = __snapdev_do_unmount_work(dev);
     
     if (ret == 0) {
-        remove_device_if_disabled(dev);
+        remove_device_if_disabled_after_unmount(dev);
     }
     return ret;
 }
@@ -367,7 +399,7 @@ bool snapdev_is_mounted(struct snap_device *dev)
  * ============================================================ */
 
 /* Clear all devices */
-void clear_snap_devices(void)
+static void clear_snap_devices(void)
 {
     struct snap_device *dev, *tmp;
 
@@ -380,9 +412,38 @@ void clear_snap_devices(void)
         snapdev_mark_unmounted(dev);
         __snapdev_do_unmount_work(dev);
         
-        __remove_device_if_disabled(dev);
+        __remove_device_if_disabled(dev, false);
     }
     mutex_unlock(&snap_dev_mutex);
     synchronize_rcu();
+}
+
+/* ============================================================
+ * Init/Exit
+ * ============================================================ */
+
+int bdev_list_init(void)
+{
+    /* Creating the global cleanup workqueue */
+    cleanup_wq = alloc_workqueue("snap_cleanup_wq",
+                                 WQ_UNBOUND | WQ_HIGHPRI | WQ_MEM_RECLAIM,
+                                 0);
+    if (!cleanup_wq) {
+        pr_err("%s: failed to allocate cleanup_wq\n", MOD_NAME);
+        return -ENOMEM;
+    }
+    
+    return 0;
+}
+
+void bdev_list_exit(void)
+{
+    clear_snap_devices();
+
+    if (cleanup_wq) {
+        flush_workqueue(cleanup_wq);
+        destroy_workqueue(cleanup_wq);
+        cleanup_wq = NULL;
+    }
 }
 

@@ -44,6 +44,13 @@ static int __init bdevsnapshot_init(void)
         goto err_cdev_init;
     }
     
+    /* Init device list subsystem (creates cleanup_wq) */
+    ret = bdev_list_init();
+    if (ret) {
+        pr_err("%s: device list init failed (%d)\n", MOD_NAME, ret);
+        goto err_list_init;
+    }
+    
     /* Init kprobes */
     ret = bdev_kprobe_module_init();
     if (ret) {
@@ -56,6 +63,8 @@ static int __init bdevsnapshot_init(void)
 
     /* --- Error paths --- */
 err_kprobe_init:
+    bdev_list_exit();
+err_list_init:
     cdev_snap_exit();
 err_cdev_init:
     bdev_auth_exit();    
@@ -65,7 +74,7 @@ err_cdev_init:
 static void __exit bdevsnapshot_exit(void)
 {
     bdev_kprobe_module_exit();
-    clear_snap_devices();
+    bdev_list_exit();
     cdev_snap_exit();
     bdev_auth_exit();
 

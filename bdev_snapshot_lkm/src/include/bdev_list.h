@@ -21,9 +21,14 @@ struct snap_device {
     struct workqueue_struct *wq;
 };
 
+/* Work struct for workqueue cleanup */
+struct wq_cleanup_work {
+    struct work_struct work;
+    struct snap_device *dev;
+};
+
 int add_or_enable_snap_device(const char *dev_name);
 int disable_snap_device(const char *dev_name);
-void clear_snap_devices(void);
 
 struct snap_device *snap_find_device_get(const char *dev_name);
 void snap_device_get(struct snap_device *dev);
@@ -36,6 +41,9 @@ int snapdev_do_unmount_work(struct snap_device *dev);
 
 unsigned long *snapdev_get_saved_bitmap(struct snap_device *dev);
 bool snapdev_is_mounted(struct snap_device *dev);
+
+int bdev_list_init(void);
+void bdev_list_exit(void);
 
 #endif
 

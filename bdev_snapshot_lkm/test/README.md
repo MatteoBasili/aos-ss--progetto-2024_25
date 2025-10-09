@@ -95,7 +95,7 @@ This script compares the **original image** and the **modified image** to confir
 Now, use the user-space tool (`bdev_snap_app`) to **restore** the snapshot:
 
 - Provide the **absolute path** of the modified image (same as before)  
-- Use the **same password** used when the snapshot was created
+- Use the **same password** as before (the password for **all** services of the module)
 
 After confirming, the tool should restore the image to its original snapshot state.
 
