@@ -167,8 +167,8 @@ size_t snap_get_filesystem_block_size_from_inode(struct inode *inode)
         return 0;
 
     /*
-     * Preferiamo i_blkbits (block size effettiva in bit).
-     * Se non disponibile o zero, usiamo s_blocksize come fallback.
+     * We prefer i_blkbits (effective block size in bits).
+     * If unavailable or zero, we use s_blocksize as a fallback.
      */
     if (inode->i_blkbits)
         return (1UL << inode->i_blkbits);
